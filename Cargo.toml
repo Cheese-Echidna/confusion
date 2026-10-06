@@ -1,0 +1,34 @@
+[package]
+name = "confusion"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# The scaffold is headless by default. These features reserve backend dependencies;
+# they do not claim that a desktop application, solver, or kernel is implemented.
+default = []
+desktop = ["dep:gpui", "gpu"]
+gpu = ["dep:wgpu", "dep:bytemuck"]
+solver = ["dep:faer", "dep:rayon"]
+kernel = ["dep:cxx"]
+
+[dependencies]
+# See docs/libraries.md for selection rationale and native integrations.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+nalgebra = { version = "0.34", features = ["serde-serialize"] }
+petgraph = "0.8"
+blake3 = "1"
+tracing = "0.1"
+
+# GPUI 0.2.2 includes its own platform backend. gpui_platform is not published
+# on crates.io; a future upstream/fork migration must pin all GPUI crates together.
+gpui = { version = "=0.2.2", optional = true }
+wgpu = { version = "29", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+faer = { version = "0.24", optional = true }
+rayon = { version = "1", optional = true }
+# An owned, narrow OCCT bridge; no native build or unsafe code in this scaffold.
+cxx = { version = "1", optional = true }
