@@ -29,6 +29,12 @@ pub enum Action {
     Fixed,
     Dimension,
     Finish,
+    ViewFront,
+    ViewBack,
+    ViewLeft,
+    ViewRight,
+    ViewTop,
+    ViewBottom,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Feature {

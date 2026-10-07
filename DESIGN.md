@@ -12,7 +12,7 @@ Source: https://github.com/zed-industries/zed/blob/main/assets/themes/gruvbox/gr
 
 ## Structure
 
-A compact top row has file/undo actions and workspace tabs. Under it, grouped mode-specific tool ribbons expose feature menus. A collapsible document tree sits to the left of the model viewport. Contextual editors appear only when requested. The viewport's upper right holds an interactive orientation cube and view/grid controls. A session timeline is at the bottom. No bottom navigation toolbar.
+A compact top row has file/undo actions and workspace tabs. Under it, grouped mode-specific tool ribbons expose feature menus. A collapsible document tree sits to the left of the model viewport. Contextual editors appear only when requested. The viewport's upper right holds an interactive orientation cube and view/grid controls. A persistent construction timeline is at the bottom; parameter edit undo and redo remain in memory only. No bottom navigation toolbar.
 
 ## Typography and controls
 
@@ -20,4 +20,4 @@ System sans, 12–13 px interface text, minimal section labels. Icon buttons are
 
 ## Assets
 
-Use the provided librecad_svg_icons unchanged. Reuse existing artwork as placeholders when no exact feature icon exists; do not author new icons. Its readme states the assets are CC0.
+Use the provided librecad_svg_icons with their original geometry. Adapt existing color slots at runtime for dark-theme contrast; preserve the source SVGs. Reuse existing artwork as placeholders when no exact feature icon exists; do not author new icons. Its readme states the assets are CC0.

@@ -91,6 +91,7 @@ mod implementation {
         construction_cursor: Option<Uuid>,
         cube_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
         menu_x: f32,
+        before_construction: bool,
     }
 
     impl WorkspaceView {
@@ -140,6 +141,7 @@ mod implementation {
                 construction_cursor: None,
                 cube_bounds: Rc::new(Cell::new(None)),
                 menu_x: 12.,
+                before_construction: false,
             }
         }
 
@@ -235,7 +237,14 @@ mod implementation {
                 .construction_cursor
                 .and_then(|id| self.design.through_feature(id).ok())
                 .unwrap_or_else(|| self.design.clone());
-            self.worker.submit(self.revision, snapshot);
+            self.worker.submit(
+                self.revision,
+                if self.before_construction {
+                    Design::default()
+                } else {
+                    snapshot
+                },
+            );
             for p in &self.design.parameters {
                 if !self.inputs.iter().any(|(id, _)| *id == p.id) {
                     self.inputs
@@ -385,6 +394,7 @@ mod implementation {
             self.sketch = false;
             self.mode = Mode::Solid;
             self.construction_cursor = None;
+            self.before_construction = false;
             self.anchor = None;
             self.tool = Tool::Select;
             self.rebuild(cx);
@@ -400,6 +410,7 @@ mod implementation {
             self.sketch = false;
             self.mode = Mode::Solid;
             self.construction_cursor = None;
+            self.before_construction = false;
             self.panel = None;
             self.menu = None;
             self.tool = Tool::Select;
@@ -435,7 +446,8 @@ mod implementation {
             }
             match crate::persistence::container::load(&path) {
                 Ok(d) => {
-                    self.checkpoint();
+                    self.undo.clear();
+                    self.redo.clear();
                     self.design = d;
                     self.saved_path = Some(path);
                     self.inputs.clear();
@@ -445,6 +457,7 @@ mod implementation {
                     self.sketch = false;
                     self.mode = Mode::Solid;
                     self.construction_cursor = None;
+                    self.before_construction = false;
                     self.panel = None;
                     if let Some(e) = &self.design.extrusion
                         && let Some(p) = self.design.parameters.iter().find(|p| p.id == e.depth)
@@ -472,11 +485,12 @@ mod implementation {
         }
 
         fn refresh_mesh(&mut self) {
-            if self.mode == Mode::Solid && !self.hidden.contains("bodies") {
-                if let Some((vertices, indices)) = &self.mesh {
-                    self.gpu.set_mesh(vertices, indices);
-                    return;
-                }
+            if self.mode == Mode::Solid
+                && !self.hidden.contains("bodies")
+                && let Some((vertices, indices)) = &self.mesh
+            {
+                self.gpu.set_mesh(vertices, indices);
+                return;
             }
             self.gpu.set_mesh(&[], &[]);
         }
@@ -488,6 +502,7 @@ mod implementation {
             self.menu = None;
             self.panel = None;
             self.construction_cursor = None;
+            self.before_construction = false;
             self.changed_camera();
             self.refresh_mesh();
             self.rebuild(cx);
@@ -537,6 +552,28 @@ mod implementation {
                 Action::Horizontal => self.apply_constraint(0, cx),
                 Action::Vertical => self.apply_constraint(1, cx),
                 Action::Fixed => self.apply_constraint(2, cx),
+                Action::ViewFront
+                | Action::ViewBack
+                | Action::ViewLeft
+                | Action::ViewRight
+                | Action::ViewTop
+                | Action::ViewBottom => {
+                    if self.sketch {
+                        self.status = "Sketch view is locked to XY".into();
+                    } else {
+                        use nalgebra::Vector3;
+                        let (direction, up) = match action {
+                            Action::ViewFront => (-Vector3::y(), Vector3::z()),
+                            Action::ViewBack => (Vector3::y(), Vector3::z()),
+                            Action::ViewLeft => (-Vector3::x(), Vector3::z()),
+                            Action::ViewRight => (Vector3::x(), Vector3::z()),
+                            Action::ViewTop => (Vector3::z(), Vector3::y()),
+                            _ => (-Vector3::z(), -Vector3::y()),
+                        };
+                        self.camera.set_direction(direction, up);
+                        self.changed_camera();
+                    }
+                }
                 Action::Finish => {
                     self.set_mode(Mode::Solid, cx);
                     self.fit();
@@ -550,6 +587,7 @@ mod implementation {
             self.line = None;
             self.anchor = None;
             self.construction_cursor = None;
+            self.before_construction = false;
             self.depth = cx.new(|cx| {
                 TextInput::new(
                     self.design
@@ -578,6 +616,7 @@ mod implementation {
         }
         fn construction_step(&mut self, id: Option<Uuid>, edit: bool, cx: &mut Context<Self>) {
             self.construction_cursor = id;
+            self.before_construction = false;
             self.menu = None;
             self.tool = Tool::Select;
             self.anchor = None;
@@ -842,7 +881,11 @@ mod implementation {
                         .hover(|s| s.bg(rgb(t::HOVER)))
                         .child(icon("down", 11., t::MUTED))
                         .tooltip(move |_, cx| cx.new(|_| GroupTip(name)).into())
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.menu_x = (f64::from(event.position().x) as f32 - 48.).clamp(
+                                8.,
+                                f64::from(window.bounds().size.width).max(352.) as f32 - 336.,
+                            );
                             this.menu = if this.menu == Some(name) {
                                 None
                             } else {
@@ -1266,73 +1309,69 @@ mod implementation {
                     }
                 }
             }
-            if panel == Panel::Dimension || (panel == Panel::Parameters && self.line.is_some()) {
-                if let Some(line) = self.line {
-                    let ends = self
-                        .design
-                        .lines
-                        .iter()
-                        .find(|l| l.id == line)
-                        .map(|l| l.ends)
-                        .unwrap_or_default();
-                    for c in &self.design.constraints {
-                        let label = match &c.kind {
-                            ConstraintKind::Horizontal { line: id } if *id == line => {
-                                Some("Horizontal")
-                            }
-                            ConstraintKind::Vertical { line: id } if *id == line => {
-                                Some("Vertical")
-                            }
-                            ConstraintKind::Length { line: id, .. } if *id == line => {
-                                Some("Length")
-                            }
-                            ConstraintKind::Fixed { point, .. } if ends.contains(point) => {
-                                Some("Fixed point")
-                            }
-                            ConstraintKind::DistanceX { points, .. }
-                                if points.iter().any(|p| ends.contains(p)) =>
-                            {
-                                Some("Width")
-                            }
-                            ConstraintKind::DistanceY { points, .. }
-                                if points.iter().any(|p| ends.contains(p)) =>
-                            {
-                                Some("Height")
-                            }
-                            _ => None,
-                        };
-                        if let Some(label) = label {
-                            let id = c.id;
-                            content = content.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .text_color(rgb(if self.conflicts.contains(&id) {
-                                        t::ERROR
-                                    } else {
-                                        t::MUTED
-                                    }))
-                                    .child(label)
-                                    .child(
-                                        button(
-                                            SharedString::from(format!("remove-{id}")),
-                                            "remove",
-                                            "Remove constraint",
-                                            false,
-                                            true,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.checkpoint();
-                                                this.design.constraints.retain(|c| c.id != id);
-                                                this.rebuild(cx);
-                                                window.focus(&this.focus);
-                                            }),
-                                        ),
-                                    ),
-                            )
+            if (panel == Panel::Dimension || (panel == Panel::Parameters && self.line.is_some()))
+                && let Some(line) = self.line
+            {
+                let ends = self
+                    .design
+                    .lines
+                    .iter()
+                    .find(|l| l.id == line)
+                    .map(|l| l.ends)
+                    .unwrap_or_default();
+                for c in &self.design.constraints {
+                    let label = match &c.kind {
+                        ConstraintKind::Horizontal { line: id } if *id == line => {
+                            Some("Horizontal")
                         }
+                        ConstraintKind::Vertical { line: id } if *id == line => Some("Vertical"),
+                        ConstraintKind::Length { line: id, .. } if *id == line => Some("Length"),
+                        ConstraintKind::Fixed { point, .. } if ends.contains(point) => {
+                            Some("Fixed point")
+                        }
+                        ConstraintKind::DistanceX { points, .. }
+                            if points.iter().any(|p| ends.contains(p)) =>
+                        {
+                            Some("Width")
+                        }
+                        ConstraintKind::DistanceY { points, .. }
+                            if points.iter().any(|p| ends.contains(p)) =>
+                        {
+                            Some("Height")
+                        }
+                        _ => None,
+                    };
+                    if let Some(label) = label {
+                        let id = c.id;
+                        content = content.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .text_color(rgb(if self.conflicts.contains(&id) {
+                                    t::ERROR
+                                } else {
+                                    t::MUTED
+                                }))
+                                .child(label)
+                                .child(
+                                    button(
+                                        SharedString::from(format!("remove-{id}")),
+                                        "remove",
+                                        "Remove constraint",
+                                        false,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.checkpoint();
+                                            this.design.constraints.retain(|c| c.id != id);
+                                            this.rebuild(cx);
+                                            window.focus(&this.focus);
+                                        },
+                                    )),
+                                ),
+                        )
                     }
                 }
             }
@@ -1378,6 +1417,18 @@ mod implementation {
                             move |bounds, _, window, cx| paint_cube(bounds, &camera, window, cx),
                         )
                         .size_full(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.menu_x = (f64::from(event.position.x) as f32 - 160.).clamp(
+                                8.,
+                                f64::from(window.bounds().size.width).max(352.) as f32 - 336.,
+                            );
+                            this.menu = Some("Orient");
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1505,12 +1556,18 @@ mod implementation {
                 .border_color(rgb(t::BORDER));
             row = row
                 .child(
-                    button("timeline-start", "upmost", "Before extrusion", false, true).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            let id = this.design.construction.first().map(|f| f.id);
-                            this.construction_step(id, false, cx);
-                        }),
-                    ),
+                    button(
+                        "timeline-start",
+                        "upmost",
+                        "Before all construction",
+                        false,
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.construction_step(None, false, cx);
+                        this.before_construction = true;
+                        this.rebuild(cx);
+                    })),
                 )
                 .child(
                     button(
@@ -1524,13 +1581,15 @@ mod implementation {
                         let index = this
                             .construction_cursor
                             .and_then(|id| this.design.construction.iter().position(|f| f.id == id))
-                            .unwrap_or(this.design.construction.len());
-                        let id = this
-                            .design
-                            .construction
-                            .get(index.saturating_sub(1))
-                            .map(|f| f.id);
-                        this.construction_step(id, false, cx);
+                            .unwrap_or(this.design.construction.len().saturating_sub(1));
+                        if index == 0 {
+                            this.construction_step(None, false, cx);
+                            this.before_construction = true;
+                            this.rebuild(cx);
+                        } else {
+                            let id = this.design.construction.get(index - 1).map(|f| f.id);
+                            this.construction_step(id, false, cx);
+                        }
                     })),
                 )
                 .child(separator());
@@ -1562,11 +1621,13 @@ mod implementation {
                             active,
                             true,
                         )
-                        .opacity(if cursor.is_some_and(|i| index > i) {
-                            0.35
-                        } else {
-                            1.
-                        })
+                        .opacity(
+                            if self.before_construction || cursor.is_some_and(|i| index > i) {
+                                0.35
+                            } else {
+                                1.
+                            },
+                        )
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.construction_step(Some(id), true, cx);
@@ -1578,20 +1639,63 @@ mod implementation {
                         s.child(div().w(px(2.)).h(px(28.)).bg(rgb(t::ACCENT)).flex_none())
                     });
             }
-            row.child(strip).child(separator()).child(
-                button(
-                    "timeline-end",
-                    "downmost",
-                    "Restore all construction features",
-                    false,
-                    true,
+            row.child(strip)
+                .child(separator())
+                .child(
+                    button(
+                        "timeline-next",
+                        "down",
+                        "Next construction feature",
+                        false,
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let next = if this.before_construction {
+                            this.design.construction.first().map(|f| f.id)
+                        } else {
+                            this.construction_cursor
+                                .and_then(|id| {
+                                    this.design.construction.iter().position(|f| f.id == id)
+                                })
+                                .and_then(|index| this.design.construction.get(index + 1))
+                                .map(|f| f.id)
+                        };
+                        this.construction_step(next, false, cx);
+                    })),
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.construction_step(None, false, cx))),
-            )
+                .child(
+                    button(
+                        "timeline-end",
+                        "downmost",
+                        "Restore all construction features",
+                        false,
+                        true,
+                    )
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.construction_step(None, false, cx)),
+                    ),
+                )
         }
         fn menu_overlay(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
             let name = self.menu?;
-            let features: Vec<Feature> = if name == "Export" {
+            let features: Vec<Feature> = if name == "Orient" {
+                [
+                    ("Front", Action::ViewFront),
+                    ("Back", Action::ViewBack),
+                    ("Left", Action::ViewLeft),
+                    ("Right", Action::ViewRight),
+                    ("Top", Action::ViewTop),
+                    ("Bottom", Action::ViewBottom),
+                ]
+                .into_iter()
+                .map(|(label, action)| Feature {
+                    id: label,
+                    name: label,
+                    icon: "camera",
+                    action: Some(action),
+                })
+                .collect()
+            } else if name == "Export" {
                 vec![
                     Feature {
                         id: "export-step",
@@ -1619,7 +1723,9 @@ mod implementation {
                 .top(px(104.))
                 .left(px(self.menu_x))
                 .w(px(328.))
-                .max_h(px(440.))
+                .max_h(px(self.bounds.get().map_or(440., |b| {
+                    f64::from(b.size.height).clamp(120., 440.) as f32
+                })))
                 .flex()
                 .flex_col()
                 .bg(rgb(t::PANEL))
@@ -2030,7 +2136,10 @@ mod implementation {
                     Err(e) => self.error = Some(e),
                 }
             }
-            self.gpu.set_grid(self.mode == Mode::Solid && self.grid);
+            self.gpu.set_grid(
+                self.mode == Mode::Solid && self.grid,
+                !self.hidden.contains("origin"),
+            );
             match self
                 .gpu
                 .draw(&self.camera, self.selected, self.pending_pick.take())
@@ -2044,7 +2153,9 @@ mod implementation {
                 let _ = entity.update(cx, |_, cx| cx.notify());
             });
             let status = self.error.clone().unwrap_or_else(|| {
-                if self.mode == Mode::Drawing {
+                if self.before_construction {
+                    "Before construction".into()
+                } else if self.mode == Mode::Drawing {
                     "Drawing · Not implemented".into()
                 } else {
                     self.status.clone()

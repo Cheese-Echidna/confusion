@@ -37,7 +37,8 @@ for all source contracts, [libraries.md](libraries.md) for dependencies and
 5. Workers consume immutable document snapshots. A session owns the document's
    single writer and accepts results only for the matching revision/request.
 6. `.con` is a versioned container of current parametric intent and required source
-   assets. Application settings, including all keybindings, live in one JSON file.
+   assets, including the persistent construction feature sequence and dependencies.
+   Application settings, including all keybindings, live in one JSON file.
 7. Undo/redo remains available in memory. Undo stacks, command logs and edit
    chronology are never saved into `.con`.
 

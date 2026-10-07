@@ -1,3 +1,5 @@
+> The current shell and controls are documented in [User interface](user-interface.md).
+
 # Planar sketch → parametric solid
 
 This implementation connects the previously validated GPU viewport to an owned local
@@ -60,7 +62,9 @@ Apply or Extrude, not by typing. Keymap configuration remains future work.
   feature operations are not implemented by this extrusion adapter.
 - `persistence/container.rs`: version-1 ZIP with `manifest.json` and `design.json`,
   structural checks, size limits and atomic replacement in the destination directory.
-  No solver results, triangles, B-rep cache or edit history are stored. Undo is session
+  Version 2 saves current construction features and dependencies; version 1 designs
+  are migrated on load. No solver results, triangles, B-rep cache or parameter edit history
+  are stored. Undo is session
   memory only. The UI refuses to overwrite an existing path it has not opened/saved.
 - `ui/viewport.rs`: document/gesture orchestration and mode-sensitive navigation.
   Sketch graphics use GPUI's GPU compositor; solid rendering and picking use shared

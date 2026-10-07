@@ -35,6 +35,7 @@ mod implementation {
         encode_srgb: bool,
         grid: super::super::grid::GridRenderer,
         show_grid: bool,
+        show_axes: bool,
     }
 
     impl ViewportRenderer {
@@ -146,10 +147,12 @@ mod implementation {
                 encode_srgb: !format.is_srgb(),
                 grid,
                 show_grid: false,
+                show_axes: true,
             }
         }
 
-        pub fn set_grid(&mut self, visible: bool) {
+        pub fn set_grid(&mut self, visible: bool, axes: bool) {
+            self.show_axes = axes;
             self.show_grid = visible;
         }
 
@@ -305,7 +308,7 @@ mod implementation {
                 pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
                 if self.show_grid {
-                    self.grid.draw(&mut pass);
+                    self.grid.draw(&mut pass, self.show_axes);
                 }
             }
             self.queue.submit([encoder.finish()])

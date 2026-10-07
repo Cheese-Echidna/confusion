@@ -25,11 +25,19 @@ nix-shell --run 'cargo run --features desktop --locked'
 On other systems, install OCCT and GPUI's native prerequisites, set
 `OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR`, and run `cargo run --features desktop`.
 
-Press **R**, then click opposite corners to draw a dimensioned rectangle. Change
-`width` or `height` in the sidebar and click **Apply**. Set an extrusion depth
-(for example `10 mm`) and click **Extrude / update**. Enter a local filename in the
-Document field to **Save** or **Open** a `.con` file. See the
-[workflow guide](docs/parametric-workflow.md) for controls and implementation limits.
+The GPUI shell includes Solid, Sketch and Drawing tabs, contextual icon ribbons,
+a collapsible document tree, a camera cube, view controls and a construction timeline.
+Feature menus include future tools marked **Not implemented**.
+
+Press **R**, then click opposite corners to draw a dimensioned rectangle. Open
+Parameters from the Modify menu to change its dimensions. Press **E** to edit
+extrusion depth and use the apply icon. Open and Save use a local path editor.
+See the [UI guide](docs/user-interface.md) and
+[workflow guide](docs/parametric-workflow.md) for controls and current limits.
+
+`.con` files save current construction features and their dependencies. The bottom
+timeline previews and edits those features. Undo and redo store parameter and other
+edits in memory only; those edit records are discarded when the application closes.
 
 The desktop experiment uses a pinned GPUI-compatible WGPUI fork for shared-device
 GPU composition. See [viewport proof](docs/viewport-proof.md) for implementation,

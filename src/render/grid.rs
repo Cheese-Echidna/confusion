@@ -130,10 +130,15 @@ mod implementation {
                 count: vertices.len() as u32,
             }
         }
-        pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, axes: bool) {
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
-            pass.draw(0..self.count, 0..1);
+            if axes {
+                pass.draw(0..self.count, 0..1);
+            } else {
+                pass.draw(0..160, 0..1);
+                pass.draw(164..self.count, 0..1);
+            }
         }
     }
 }

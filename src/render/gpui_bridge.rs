@@ -35,8 +35,8 @@ mod implementation {
             }
         }
 
-        pub fn set_grid(&mut self, visible: bool) {
-            self.renderer.set_grid(visible);
+        pub fn set_grid(&mut self, visible: bool, axes: bool) {
+            self.renderer.set_grid(visible, axes);
         }
 
         pub fn set_mesh(&mut self, vertices: &[crate::render::scene::DemoVertex], indices: &[u32]) {

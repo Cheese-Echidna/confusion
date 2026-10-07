@@ -183,3 +183,131 @@ fn background_latest_revision_regenerates_and_kernel_errors_are_results() {
     ];
     assert!(ffi::extrude(&points, -0.01).is_err());
 }
+
+#[test]
+fn construction_survives_reopen_without_parameter_edit_history() {
+    use confusion::document::schema::{ConstructionKind, Extrusion};
+    let mut design = rectangle();
+    let depth = design.parameter("depth", "10 mm".into());
+    design.extrusion = Some(Extrusion {
+        id: uuid::Uuid::new_v4(),
+        depth,
+    });
+    design.sync_construction();
+    let ids: Vec<_> = design.construction.iter().map(|f| f.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(
+        matches!(design.construction[1].kind, ConstructionKind::Extrude { sketch } if sketch == ids[0])
+    );
+    let preview = design.through_feature(ids[0]).unwrap();
+    assert!(preview.extrusion.is_none());
+    assert!(design.extrusion.is_some());
+    design.parameters[0].expression = "60 mm".into();
+    design.sync_construction();
+    assert_eq!(
+        ids,
+        design.construction.iter().map(|f| f.id).collect::<Vec<_>>()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("construction.con");
+    container::save(&path, &design).unwrap();
+    let reopened = container::load(&path).unwrap();
+    assert_eq!(
+        ids,
+        reopened
+            .construction
+            .iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(reopened.parameters[0].expression, "60 mm");
+    assert!(reopened.extrusion.is_some());
+    let mut invalid = reopened;
+    invalid.construction.swap(0, 1);
+    assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn orientation_cube_cardinal_views_and_free_orbit_stay_pickable() {
+    use confusion::{render::camera::Camera, ui::view_cube};
+    use nalgebra::Vector3;
+    let mut camera = Camera::default();
+    for (direction, up, label) in [
+        (Vector3::z(), Vector3::y(), "Top"),
+        (-Vector3::z(), -Vector3::y(), "Bottom"),
+        (Vector3::x(), Vector3::z(), "Right"),
+        (-Vector3::x(), Vector3::z(), "Left"),
+        (Vector3::y(), Vector3::z(), "Back"),
+        (-Vector3::y(), Vector3::z(), "Front"),
+    ] {
+        camera.set_direction(direction, up);
+        assert!((camera.outward() - direction).norm() < 1e-12);
+        assert!(
+            camera
+                .view_projection(800, 600)
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        assert_eq!(view_cube::pick(&camera, [62., 52.]).unwrap().label, label);
+    }
+    for _ in 0..100 {
+        camera.free_orbit([31., 57.]);
+        assert!(camera.up().dot(&camera.outward()).abs() < 1e-12);
+        assert!(
+            camera
+                .view_projection(800, 600)
+                .iter()
+                .all(|v| v.is_finite())
+        );
+    }
+}
+
+#[test]
+fn legacy_files_gain_construction_without_edit_history() {
+    use std::io::Write;
+    let mut design = rectangle();
+    let depth = design.parameter("depth", "10 mm".into());
+    design.extrusion = Some(confusion::document::schema::Extrusion {
+        id: uuid::Uuid::new_v4(),
+        depth,
+    });
+    let mut json = serde_json::to_value(&design).unwrap();
+    json.as_object_mut().unwrap().remove("construction");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.con");
+    let mut archive = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("manifest.json", options).unwrap();
+    archive
+        .write_all(br#"{"format":"confusion","version":1,"units":"metres"}"#)
+        .unwrap();
+    archive.start_file("design.json", options).unwrap();
+    archive
+        .write_all(&serde_json::to_vec(&json).unwrap())
+        .unwrap();
+    archive.finish().unwrap();
+    let migrated = container::load(&path).unwrap();
+    assert_eq!(migrated.construction.len(), 2);
+    assert_eq!(migrated.extrusion.unwrap().id, design.extrusion.unwrap().id);
+}
+
+#[test]
+fn tool_catalog_has_unique_ids_existing_icons_and_unavailable_drawings() {
+    use confusion::ui::toolbar::{Mode, groups};
+    let mut ids = std::collections::HashSet::new();
+    for mode in [Mode::Solid, Mode::Sketch, Mode::Drawing] {
+        for group in groups(mode) {
+            assert!(!group.features.is_empty());
+            for feature in group.features {
+                assert!(ids.insert(feature.id), "duplicate {}", feature.id);
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("librecad_svg_icons")
+                    .join(format!("{}.svg", feature.icon));
+                assert!(path.is_file(), "missing {}", feature.icon);
+                if mode == Mode::Drawing {
+                    assert!(!feature.available());
+                }
+            }
+        }
+    }
+}

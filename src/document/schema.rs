@@ -1,5 +1,6 @@
 //! Current planar design intent, in metres, with stable IDs and parameter-driven constraints.
-//! Exports Design, Point, Line, Constraint and Parameter; solver, persistence and UI share
+//! Exports Design, Point, Line, Constraint, Parameter and stable ConstructionFeature/Kind;
+//! solver, persistence and UI share
 //! these values. Meshes, solver results and edit history must never enter this schema.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -196,14 +197,14 @@ impl Design {
                 "width{}",
                 if n == 0 { String::new() } else { n.to_string() }
             ),
-            format!("{} mm", (b[0] - a[0]) * 1000.),
+            millimetres(b[0] - a[0]),
         );
         let height = self.parameter(
             &format!(
                 "height{}",
                 if n == 0 { String::new() } else { n.to_string() }
             ),
-            format!("{} mm", (b[1] - a[1]) * 1000.),
+            millimetres(b[1] - a[1]),
         );
         self.constrain(ConstraintKind::DistanceX {
             points: [ids[0], ids[1]],
@@ -325,4 +326,13 @@ impl Design {
         }
         Ok(())
     }
+}
+
+fn millimetres(value: f64) -> String {
+    format!(
+        "{} mm",
+        format!("{:.9}", value * 1000.)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+    )
 }

@@ -622,9 +622,9 @@ fn palette_svg(bytes: &[u8]) -> Vec<u8> {
             let b = value & 255;
             let color = if r.max(g).max(b) - r.min(g).min(b) < 35 {
                 if r < 70 {
-                    t::VIEWPORT
-                } else if r > 195 {
                     t::TEXT
+                } else if r > 195 {
+                    t::VIEWPORT
                 } else {
                     t::MUTED
                 }
