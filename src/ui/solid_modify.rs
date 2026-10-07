@@ -3,6 +3,7 @@ use crate::model::modify::{BodyStyle, Material, ModifyKind, SolidEdit};
 struct SolidEditor {
     kind: ModifyKind,
     editing: Option<Uuid>,
+    reference: Option<String>,
     target: Option<Uuid>,
     tool: Option<Uuid>,
     fields: Vec<Entity<TextInput>>,
@@ -16,6 +17,7 @@ impl SolidEditor {
         Self {
             kind: ModifyKind::PressPull,
             editing: None,
+            reference: None,
             target: None,
             tool: None,
             fields: vec![],
@@ -53,6 +55,7 @@ impl WorkspaceView {
         self.before_construction = false;
         self.solid_editor.kind = kind;
         self.solid_editor.editing = None;
+        self.solid_editor.reference = self.face_names.get(&self.selected).cloned();
         self.solid_editor.target = self.selected_body().or_else(|| {
             self.design
                 .current_modify_bodies()
@@ -103,7 +106,19 @@ impl WorkspaceView {
         self.solid_editor.tool = edit.tool;
         self.solid_editor.copy = edit.copy;
         self.solid_editor.mode = edit.mode;
-        self.selected = edit.face;
+        self.solid_editor.reference = edit.face_reference.clone();
+        // Repair against the model before the edit, including failed documents.
+        self.design.sync_construction();
+        let previous = self.design.construction.iter()
+            .position(|feature| feature.id == id)
+            .and_then(|index| index.checked_sub(1))
+            .map(|index| self.design.construction[index].id);
+        self.construction_cursor = previous;
+        self.before_construction = previous.is_none();
+        self.rebuild(cx);
+        if edit.face_reference.is_none() {
+            self.selected = edit.face;
+        }
         for (i, field) in self.solid_editor.fields.iter().enumerate() {
             let slot = if edit.kind == ModifyKind::ReplaceFace {
                 1
@@ -276,7 +291,20 @@ impl WorkspaceView {
                 kind,
                 target,
                 tool: self.solid_editor.tool,
-                face: self.selected,
+                face: if kind.uses_face() { self.selected } else { 0 },
+                face_reference: if !kind.uses_face() {
+                    None
+                } else if self.selected == 0 {
+                    self.solid_editor.reference.clone()
+                } else {
+                    Some(self.face_names.get(&self.selected).cloned()
+                        .ok_or("Selected face is ambiguous; choose a uniquely named face")?)
+                },
+                tool_reference: if kind == ModifyKind::ReplaceFace {
+                    self.face_names.get(&(values[1] as u32)).cloned()
+                } else {
+                    None
+                },
                 values,
                 parameters: bindings,
                 copy: self.solid_editor.copy,

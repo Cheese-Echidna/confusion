@@ -162,7 +162,14 @@ impl WorkspaceView {
             boundary: existing
                 .as_ref()
                 .filter(|f| f.sketch == editor.sketch)
-                .map_or_else(|| self.selection.clone(), |f| f.boundary.clone()),
+                .map_or_else(
+                    || {
+                        self.sketch_region
+                            .as_ref()
+                            .map_or_else(|| self.selection.clone(), |r| r.boundary.clone())
+                    },
+                    |f| f.boundary.clone(),
+                ),
             target: editor.target,
             second_target: if editor.kind == CreateKind::BoundaryFill {
                 editor.second_target
@@ -175,7 +182,9 @@ impl WorkspaceView {
         if let Some(sketch) = feature.sketch {
             if let Ok(input) = candidate.sketch_input(sketch) {
                 let curves = crate::sketch::entities::curve_ids(&input);
-                feature.boundary.retain(|id| curves.contains(id));
+                feature.boundary.retain(|id| {
+                    curves.contains(id) || crate::sketch::regions::is_boundary_token(id)
+                });
             }
         } else {
             feature.boundary.clear();

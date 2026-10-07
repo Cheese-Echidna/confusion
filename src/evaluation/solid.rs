@@ -163,16 +163,7 @@ mod implementation {
             let start = edges.len() as u32;
             for (wire, w) in region.wires.iter().enumerate() {
                 for e in w {
-                    edges.push(ffi::ProfileEdge {
-                        wire: wire as u32,
-                        sx: e.start[0],
-                        sy: e.start[1],
-                        ex: e.end[0],
-                        ey: e.end[1],
-                        cx: e.center[0],
-                        cy: e.center[1],
-                        sweep: e.sweep,
-                    });
+                    edges.push(e.native(wire as u32));
                 }
             }
             let (support, producer, role) = match design.sketch_plane(feature.sketch)? {
@@ -188,6 +179,7 @@ mod implementation {
                 ),
             };
             steps.push(ffi::ModelStep {
+                identity: feature.id.to_string(),
                 edge_start: start,
                 edge_count: edges.len() as u32 - start,
                 depth: parameters[&feature.depth],
@@ -228,16 +220,7 @@ mod implementation {
                         let region = regions::select(&input, &solved.points, boundary)?;
                         for (wire, w) in region.wires.iter().enumerate() {
                             for e in w {
-                                edges.push(ffi::ProfileEdge {
-                                    wire: wire as u32,
-                                    sx: e.start[0],
-                                    sy: e.start[1],
-                                    ex: e.end[0],
-                                    ey: e.end[1],
-                                    cx: e.center[0],
-                                    cy: e.center[1],
-                                    sweep: e.sweep,
-                                });
+                                edges.push(e.native(wire as u32));
                             }
                         }
                     }
@@ -246,6 +229,7 @@ mod implementation {
             let (edge_start, edge_count) = add_profile(feature.sketch, &feature.boundary)?;
             let (second_start, second_count) = add_profile(feature.second_sketch, &[])?;
             creates.push(ffi::CreateStep {
+                identity: feature.id.to_string(),
                 kind: feature.kind as u32,
                 edge_start,
                 edge_count,
@@ -300,6 +284,9 @@ mod implementation {
                     resolved.values = values;
                     resolved.validate()?;
                     Ok(ffi::ModifyStep {
+                        identity: e.id.to_string(),
+                        face_reference: e.face_reference.clone().unwrap_or_default(),
+                        tool_reference: e.tool_reference.clone().unwrap_or_default(),
                         kind: e.kind.code(),
                         target: index(e.target)? as u32,
                         tool: e.tool.map(&index).transpose()?.unwrap_or(-1),

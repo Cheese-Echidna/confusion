@@ -32,7 +32,7 @@ edit all expressions, including these scalar values.
 | Boundary fill | Common enclosed cell of two overlapping solids; consumes both inputs. |
 | Gear | Spur gear with sampled involute teeth at 20° pressure angle, module, tooth count, thickness, and optional bore. |
 
-Profile tools require a closed, conflict-free XY sketch. Select boundary curves
+Profile tools require a closed, conflict-free XY sketch. Click inside the desired region (or select uniquely identifying boundary curves)
 before opening the tool if a sketch contains several regions. The second loft
 sketch must contain one unambiguous region. Body tools provide explicit input-body
 buttons. Joined/cut/replaced bodies disappear from the list of available inputs;

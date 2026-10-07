@@ -45,6 +45,12 @@ impl ModifyKind {
             Self::Simplify => "Simplify",
         }
     }
+    pub fn uses_face(self) -> bool {
+        !matches!(
+            self,
+            Self::Scale | Self::Combine | Self::SplitBody | Self::MoveCopy | Self::Align
+        )
+    }
     pub fn code(self) -> u32 {
         self as u32
     }
@@ -81,6 +87,11 @@ pub struct SolidEdit {
     pub tool: Option<Uuid>,
     /// Face ordinal in the deterministic output before this edit; zero means whole body.
     pub face: u32,
+    /// Semantic kernel provenance; ordinals remain only for legacy files and display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_reference: Option<String>,
     pub values: [f64; 4],
     #[serde(default)]
     pub parameters: [Option<Uuid>; 4],
@@ -90,6 +101,13 @@ pub struct SolidEdit {
 }
 impl SolidEdit {
     pub fn validate(&self) -> Result<(), String> {
+        if [&self.face_reference, &self.tool_reference]
+            .into_iter()
+            .flatten()
+            .any(|key| key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control))
+        {
+            return Err("Invalid solid face reference".into());
+        }
         if self
             .values
             .iter()

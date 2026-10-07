@@ -113,6 +113,7 @@ mod implementation {
         ui_font_family: SharedString,
         world_sketches: Vec<(Uuid, Design, crate::sketch::workplane::Workplane)>,
         body_faces: std::collections::HashMap<u32, (Uuid, u32)>,
+        face_names: std::collections::HashMap<u32, String>,
         hidden_sketches: HashSet<Uuid>,
         hidden_bodies: HashSet<(Uuid, u32)>,
         align_sketch_pending: bool,
@@ -268,6 +269,7 @@ mod implementation {
                 ui_font_family,
                 world_sketches: vec![],
                 body_faces: Default::default(),
+                face_names: Default::default(),
                 hidden_sketches: Default::default(),
                 hidden_bodies: Default::default(),
                 align_sketch_pending: false,
@@ -572,6 +574,7 @@ mod implementation {
             self.selected = 0;
             self.face_anchors.clear();
             self.body_faces.clear();
+            self.face_names.clear();
             self.evaluated_features.clear();
             self.volume = None;
             self.inspection = None;
@@ -617,7 +620,16 @@ mod implementation {
             .ok()?;
             let region = regions
                 .iter()
-                .find(|r| r.boundary.iter().any(|id| self.selection.contains(id)))
+                .find(|r| {
+                    self.sketch_region
+                        .as_ref()
+                        .is_some_and(|selected| selected.boundary == r.boundary)
+                })
+                .or_else(|| {
+                    regions
+                        .iter()
+                        .find(|r| r.curves.iter().any(|id| self.selection.contains(id)))
+                })
                 .or_else(|| {
                     self.design
                         .solid_features()
@@ -627,9 +639,10 @@ mod implementation {
                 })
                 .or_else(|| (regions.len() == 1).then(|| &regions[0]))?;
             let curves: Vec<_> = region
-                .boundary
+                .wires
                 .iter()
-                .map(|id| crate::sketch::entities::samples(&d, *id))
+                .flatten()
+                .map(|edge| edge.samples())
                 .collect();
             let points: Vec<_> = curves.iter().flatten().collect();
             if points.is_empty() {
@@ -806,9 +819,16 @@ mod implementation {
                 .find(|f| Some(f.id) == self.editing_feature);
             let region =
                 crate::sketch::regions::regions(&input, &solution.points).and_then(|regions| {
+                    if let Some(selected) = &self.sketch_region {
+                        return crate::sketch::regions::select(
+                            &input,
+                            &solution.points,
+                            &selected.boundary,
+                        );
+                    }
                     let selected: Vec<_> = regions
                         .iter()
-                        .filter(|r| r.boundary.iter().any(|id| self.selection.contains(id)))
+                        .filter(|r| r.curves.iter().any(|id| self.selection.contains(id)))
                         .collect();
                     if selected.len() == 1 {
                         Ok(selected[0].clone())
@@ -1064,6 +1084,7 @@ mod implementation {
             self.mesh = None;
             self.world_sketches.clear();
             self.body_faces.clear();
+            self.face_names.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.active_document = index;
@@ -1087,6 +1108,7 @@ mod implementation {
             self.mesh = None;
             self.world_sketches.clear();
             self.body_faces.clear();
+            self.face_names.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.forget_recovery(index);
@@ -1133,6 +1155,7 @@ mod implementation {
             self.mesh = None;
             self.world_sketches.clear();
             self.body_faces.clear();
+            self.face_names.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.documents
@@ -4050,7 +4073,7 @@ mod implementation {
                 .sketch_region
                 .as_ref()
                 .filter(|region| {
-                    self.sketch && region.boundary.iter().all(|id| self.selection.contains(id))
+                    self.sketch && region.curves.iter().all(|id| self.selection.contains(id))
                 })
                 .map(|region| {
                     region
@@ -4715,6 +4738,12 @@ mod implementation {
                     }
                     match result.mesh {
                         Ok(Some(mesh)) => {
+                            if crate::model::naming::bind_legacy_references(
+                                &mut self.design,
+                                &mesh.references,
+                            ) {
+                                self.dirty_cache.set((u64::MAX, false));
+                            }
                             self.body_faces = mesh
                                 .bodies
                                 .iter()
@@ -4724,6 +4753,21 @@ mod implementation {
                                         .map(|id| (body.face, (*id, body.part)))
                                 })
                                 .collect();
+                            self.face_names = mesh
+                                .names
+                                .iter()
+                                .filter(|name| !name.ambiguous)
+                                .map(|name| (name.face, name.key.clone()))
+                                .collect();
+                            if self.solid_editor.editing.is_some() && self.selected == 0 {
+                                if let Some(reference) = &self.solid_editor.reference {
+                                    self.selected = self
+                                        .face_names
+                                        .iter()
+                                        .find(|(_, key)| *key == reference)
+                                        .map_or(0, |(face, _)| *face);
+                                }
+                            }
                             self.face_anchors = mesh.anchors;
                             self.volume = Some(mesh.volume);
                             self.inspection = Some(mesh.inspection);
@@ -4751,6 +4795,7 @@ mod implementation {
                         Ok(None) => {
                             self.mesh = None;
                             self.body_faces.clear();
+                            self.face_names.clear();
                             self.face_anchors.clear();
                             self.refresh_mesh();
                         }
@@ -4783,6 +4828,9 @@ mod implementation {
             {
                 Ok(Some(pick)) if pick.revision == self.view_revision => {
                     self.selected = pick.face;
+                    if self.panel == Some(Panel::SolidModify) {
+                        self.solid_editor.reference = self.face_names.get(&pick.face).cloned();
+                    }
                     if self.choosing_sketch_face && self.selected != 0 {
                         self.choosing_sketch_face = false;
                         self.create_sketch(cx);

@@ -70,3 +70,11 @@ required-features = ["solver", "kernel"]
 [[example]]
 name = "cancellation_review"
 required-features = ["solver", "kernel"]
+
+# Keep the shared-device fork, with owned native-window lifetime during surface teardown.
+[patch."https://github.com/nestrilabs/wgpui"]
+gpui-ce = { path = "vendor/wgpui" }
+
+[[example]]
+name = "window_close_smoke"
+required-features = ["desktop"]

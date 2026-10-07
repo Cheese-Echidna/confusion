@@ -129,6 +129,14 @@ Dimension extension lines are constructed on the sketch plane before projection,
 
 **Create sketch** with an existing body prompts for a face, with an explicit **Use XY plane** alternative. The current attachment backend supports unambiguous planar extrusion caps. Unsupported or ambiguous faces report an error.
 
-Click inside a closed sketch region to select its boundary and shade the selected region. Nested boundaries exclude holes. Points and edges take priority over region selection. Regions currently support the extrusion backend's closed line, circle and arc contours. Center rectangles, diameter/three-point circles, three-point arcs, ellipses, slots, polygons and splines display geometry previews before confirmation.
+Click inside a closed sketch region to select its boundary and shade the selected region. Nested boundaries exclude holes. Points and edges take priority over region selection. Lines, circles, arcs, ellipses and fit/control splines bound selectable regions. Crossings and shared edges create individual faces; open tails do not block other closed faces. Press **E** after clicking the region to extrude precisely that face. Center rectangles, diameter/three-point circles, three-point arcs, ellipses, slots, polygons and splines display geometry previews before confirmation.
 
 Native validation confirmed hover dismissal, [center rectangle preview](assets/ui-center-rectangle-preview.png), [region selection](assets/ui-region-selection.png), inline dimension entry, [retrospective sketch rollback](assets/ui-sketch-rollback.png), Finish restoring the body, and [choosing a sketch face](assets/ui-choose-sketch-face.png) followed by creating Sketch 2 on its cap. The focused desktop suite passes 19 tests; all-target desktop Clippy and formatting pass.
+
+The native regression review exercises interior face selection, a divided rectangle and ellipse extrusion, and repair of a broken Modify face reference:
+
+```sh
+nix-shell --run 'python3 examples/sketch_region_review.py'
+```
+
+It uses an isolated instrumented application and configuration directory, with assertions in the real workspace.

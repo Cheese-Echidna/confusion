@@ -13,7 +13,18 @@ pub(crate) fn feature_keys(
             .map(|edges| {
                 edges
                     .iter()
-                    .map(|e| (e.wire, e.sx, e.sy, e.ex, e.ey, e.cx, e.cy, e.sweep))
+                    .map(|e| {
+                        (
+                            (e.wire, e.sx, e.sy, e.ex, e.ey, e.cx, e.cy, e.sweep),
+                            (
+                                e.kind,
+                                e.from,
+                                e.to,
+                                &e.identity,
+                                e.poles.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(),
+                            ),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
     };
@@ -30,6 +41,7 @@ pub(crate) fn feature_keys(
         };
         keys.push(key(&(
             (
+                &step.identity,
                 step.edge_start,
                 step.edge_count,
                 step.depth,
@@ -57,6 +69,7 @@ pub(crate) fn feature_keys(
         };
         keys.push(key(&(
             (
+                &step.identity,
                 step.kind,
                 step.edge_start,
                 step.edge_count,
@@ -88,6 +101,7 @@ pub(crate) fn feature_keys(
                 step.copy,
                 step.mode,
             ),
+            (&step.identity, &step.face_reference, &step.tool_reference),
             &keys,
         ))?);
     }

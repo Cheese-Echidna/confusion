@@ -178,7 +178,9 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
       if (consume_second) consumed[s.second_target]=true;
       // Replaced topology intentionally has no extrusion cap anchors: unsupported
       // attachments fail instead of binding silently to unrelated faces.
-      outputs.push_back(Output{result,{}}); consumed.push_back(false);
+      Output output{result,{},{}};
+      name_generated(output.names,result,std::string(s.identity));
+      outputs.push_back(std::move(output)); consumed.push_back(false);
       if (entry) {
         entry->key.clear();
         entry->output = detached(outputs.back());

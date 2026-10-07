@@ -14,6 +14,12 @@ static TopoDS_Face edit_face(const std::vector<Output>& outputs,
   }
   throw std::runtime_error("Selected face no longer exists; select it again");
 }
+static std::string face_key(const Output& output,const TopoDS_Shape& face) {
+  std::vector<std::string> keys;
+  for(const auto& name:output.names)if(name.faces.size()==1&&name.faces[0].IsSame(face))keys.push_back(name.key);
+  for(const auto& key:keys)if(key.find("/branch/")!=std::string::npos)return key;
+  return keys.size()==1?keys[0]:std::string();
+}
 static gp_Pln edit_plane(const TopoDS_Face& face) {
   BRepAdaptor_Surface surface(face);
   if (surface.GetType() != GeomAbs_Plane)
@@ -22,27 +28,41 @@ static gp_Pln edit_plane(const TopoDS_Face& face) {
   if (face.Orientation() == TopAbs_REVERSED) plane.SetAxis(gp_Ax1(plane.Location(), plane.Axis().Direction().Reversed()));
   return plane;
 }
-static TopoDS_Shape boolean_edit(const TopoDS_Shape& target, const TopoDS_Shape& tool, uint32_t mode) {
+static TopoDS_Shape boolean_edit(const TopoDS_Shape& target, const TopoDS_Shape& tool, uint32_t mode,
+    const std::vector<NamedTopology>* input=nullptr,std::vector<NamedTopology>* names=nullptr) {
   if (mode == 0) {
     BRepAlgoAPI_Fuse op; boolean_inputs(op,target, tool); build_cancellable(op);
     if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Join failed");
-    return op.Shape();
+    if(input&&names)*names=follow_names(op,*input,op.Shape());
+  return op.Shape();
   }
   if (mode == 1) {
     BRepAlgoAPI_Cut op; boolean_inputs(op,target, tool); build_cancellable(op);
     if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Cut failed");
-    return op.Shape();
+    if(input&&names)*names=follow_names(op,*input,op.Shape());
+  return op.Shape();
   }
   BRepAlgoAPI_Common op; boolean_inputs(op,target, tool); build_cancellable(op);
   if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Intersection failed");
+  if(input&&names)*names=follow_names(op,*input,op.Shape());
   return op.Shape();
 }
-static TopoDS_Shape move_face(const TopoDS_Shape& shape, const TopoDS_Face& face, double distance) {
+static TopoDS_Shape move_face(const TopoDS_Shape& shape, const TopoDS_Face& face, double distance,
+    const std::vector<NamedTopology>* input=nullptr,std::vector<NamedTopology>* names=nullptr) {
   if (std::abs(distance) < 1e-7) throw std::runtime_error("Enter a nonzero face displacement");
   auto plane = edit_plane(face);
   BRepPrimAPI_MakePrism prism(face, gp_Vec(plane.Axis().Direction()) * (distance * 1000.));
   if (!prism.IsDone()) throw std::runtime_error("Could not build face displacement");
-  return boolean_edit(shape, prism.Shape(), distance > 0 ? 0 : 1);
+  std::vector<NamedTopology> sources=input?*input:std::vector<NamedTopology>{};
+  if(input)for(const auto& name:*input)for(const auto& source:name.faces) {
+    if(source.IsSame(face))add_named(sources,name.key,prism.LastShape(),prism.Shape());
+    else {
+      TopTools_IndexedMapOfShape boundary;TopExp::MapShapes(source,TopAbs_EDGE,boundary);
+      for(TopExp_Explorer edge(face,TopAbs_EDGE);edge.More();edge.Next())if(boundary.Contains(edge.Current()))
+        for(TopTools_ListIteratorOfListOfShape generated(prism.Generated(edge.Current()));generated.More();generated.Next())add_named(sources,name.key,generated.Value(),prism.Shape());
+    }
+  }
+  return boolean_edit(shape, prism.Shape(), distance > 0 ? 0 : 1,input?&sources:nullptr,names);
 }
 static TopoDS_Shape heal_face(const TopoDS_Shape& shape, const TopoDS_Face& face) {
   // Try the selected cap and adjacent walls as one pocket/boss feature first.
@@ -70,7 +90,7 @@ static TopoDS_Shape heal_face(const TopoDS_Shape& shape, const TopoDS_Face& face
 }
 static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consumed,
                         rust::Slice<const ModifyStep> edits, ModelCacheImpl *cache,
-                        rust::Slice<const rust::String> keys, size_t offset) {
+                        rust::Slice<const rust::String> keys, size_t offset, rust::Vec<BoundFaceReference>& references) {
   for (size_t n = 0; n < edits.size(); ++n) {
     check_cancelled();
     const auto& e = edits[n];
@@ -78,12 +98,16 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
     if (entry && entry->key == std::string(keys[offset + n])) {
       outputs = detached(entry->outputs);
       consumed = entry->consumed;
+      references.push_back({e.identity,rust::String(entry->face_reference),rust::String(entry->tool_reference)});
       ++cache->reused;
       continue;
     }
+    std::string bound_face(e.face_reference),bound_tool(e.tool_reference);
     auto remember = [&] {
+      references.push_back({e.identity,rust::String(bound_face),rust::String(bound_tool)});
       if (entry) {
         entry->key.clear();
+        entry->face_reference=bound_face;entry->tool_reference=bound_tool;
         entry->outputs = detached(outputs);
         entry->consumed = consumed;
         entry->key = std::string(keys[offset + n]);
@@ -99,7 +123,13 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
       if (e.target >= outputs.size() || consumed[e.target]) throw std::runtime_error("Missing or removed target body");
       auto shape = outputs[e.target].shape;
       TopoDS_Face face;
-      if (e.face) face = edit_face(outputs, consumed, e.face, e.target);
+      if (!e.face_reference.empty()) face=resolve_named(outputs,consumed,e.target,std::string(e.face_reference));
+      else if (e.face) face = edit_face(outputs, consumed, e.face, e.target);
+      if(bound_face.empty() && !face.IsNull())bound_face=face_key(outputs[e.target],face);
+      auto input_names=outputs[e.target].names;
+      std::vector<NamedTopology> result_names;
+      bool followed=false;
+      auto follow=[&](auto& operation, const TopoDS_Shape& result) {result_names=follow_names(operation,input_names,result);followed=true;};
       TopoDS_Shape tool;
       if (e.tool >= 0) {
         if (static_cast<size_t>(e.tool) >= outputs.size() || consumed[e.tool] || static_cast<uint32_t>(e.tool) == e.target)
@@ -108,7 +138,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
       }
       TopoDS_Shape result;
       switch (e.kind) {
-      case 0: case 7: result = move_face(shape, face, e.a); break;
+      case 0: case 7: result = move_face(shape, face, e.a,&input_names,&result_names);followed=true; break;
       case 1: case 2: {
         TopTools_IndexedMapOfShape edges;
         TopExp::MapShapes(face.IsNull() ? shape : face, TopAbs_EDGE, edges);
@@ -116,11 +146,11 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         if (e.kind == 1) {
           BRepFilletAPI_MakeFillet op(shape);
           for (int i = 1; i <= edges.Extent(); ++i) op.Add(e.a * 1000., TopoDS::Edge(edges(i)));
-          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Fillet failed; reduce the radius"); result = op.Shape();
+          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Fillet failed; reduce the radius"); result = op.Shape(); follow(op,result);
         } else {
           BRepFilletAPI_MakeChamfer op(shape);
           for (int i = 1; i <= edges.Extent(); ++i) op.Add(e.a * 1000., TopoDS::Edge(edges(i)));
-          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Chamfer failed; reduce the distance"); result = op.Shape();
+          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Chamfer failed; reduce the distance"); result = op.Shape(); follow(op,result);
         }
         break;
       }
@@ -131,13 +161,13 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
           op.MakeThickSolidByJoin(shape, openings, -e.a * 1000., 1e-5, BRepOffset_Skin, false, false, GeomAbs_Intersection, false, range);
         });
         if (!op.IsDone()) throw std::runtime_error("Shell failed; reduce the wall thickness");
-        result = op.Shape(); break;
+        result = op.Shape(); follow(op,result); break;
       }
       case 4: {
         BRepOffsetAPI_DraftAngle op(shape);
         op.Add(face, gp_Dir(0,0,1), e.a, gp_Pln(gp_Pnt(0,0,e.b*1000.),gp_Dir(0,0,1)));
         if (!op.AddDone()) throw std::runtime_error("Cannot draft this face along Z");
-        build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Draft failed"); result = op.Shape(); break;
+        build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Draft failed"); result = op.Shape(); follow(op,result); break;
       }
       case 5: case 12: {
         gp_Trsf tr;
@@ -148,22 +178,24 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         }
         BRepBuilderAPI_Transform op(shape,tr,true);
         if (!op.IsDone()) throw std::runtime_error("Transform failed");
-        result = op.Shape(); break;
+        result = op.Shape(); follow(op,result); break;
       }
       case 6: {
         if (tool.IsNull()) throw std::runtime_error("Choose a tool body");
-        result = boolean_edit(shape,tool,e.mode);
+        input_names.insert(input_names.end(),outputs[e.tool].names.begin(),outputs[e.tool].names.end());
+        result = boolean_edit(shape,tool,e.mode,&input_names,&result_names);followed=true;
         if (!e.copy) consumed[e.tool] = true;
         break;
       }
       case 8: {
         if (tool.IsNull()) throw std::runtime_error("Choose a replacement body and face number");
-        auto replacement = edit_face(outputs,consumed,static_cast<uint32_t>(e.b),e.tool);
+        auto replacement = e.tool_reference.empty()?edit_face(outputs,consumed,static_cast<uint32_t>(e.b),e.tool):resolve_named(outputs,consumed,e.tool,std::string(e.tool_reference));
+        if(bound_tool.empty())bound_tool=face_key(outputs[e.tool],replacement);
         auto from = edit_plane(face), to = edit_plane(replacement);
         if (std::abs(from.Axis().Direction().Dot(to.Axis().Direction())) < 1.-1e-7)
           throw std::runtime_error("Replace face currently requires parallel planar faces");
         double distance = gp_Vec(from.Location(),to.Location()).Dot(gp_Vec(from.Axis().Direction())) / 1000.;
-        result = move_face(shape,face,distance); break;
+        result = move_face(shape,face,distance,&input_names,&result_names);followed=true; break;
       }
       case 9: case 10: {
         gp_Vec normal(e.b,e.c,e.d);
@@ -174,7 +206,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
           TopTools_ListOfShape args, tools; args.Append(shape); tools.Append(cutter);
           BRepAlgoAPI_Splitter op; op.SetArguments(args);op.SetTools(tools);build_cancellable(op);
           if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Body split failed");
-          result = op.Shape();
+          result = op.Shape(); follow(op,result);
           unsigned solids=0; for(TopExp_Explorer it(result,TopAbs_SOLID);it.More();it.Next()) ++solids;
           if (solids < 2) throw std::runtime_error("Cutting plane does not split the body");
         } else {
@@ -183,7 +215,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
           BRepFeat_SplitShape op(shape); unsigned count=0;
           for(TopExp_Explorer it(section.Shape(),TopAbs_EDGE);it.More();it.Next()) { op.Add(TopoDS::Edge(it.Current()),face);++count; }
           if (!count) throw std::runtime_error("Cutting plane does not cross the selected face");
-          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Face split failed"); result=op.Shape();
+          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Face split failed"); result=op.Shape(); follow(op,result);
         }
         break;
       }
@@ -207,13 +239,13 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         BRepFeat_SplitShape op(shape);
         for(int i=1;i<=wires->Length();++i)op.Add(TopoDS::Wire(wires->Value(i)),face);
         if(!wires->Length())throw std::runtime_error("Tool outline does not cross the selected face");
-        build_cancellable(op);if(!op.IsDone())throw std::runtime_error("Silhouette split failed");result=op.Shape();break;
+        build_cancellable(op);if(!op.IsDone())throw std::runtime_error("Silhouette split failed");result=op.Shape(); follow(op,result);break;
       }
       case 13: {
         if (tool.IsNull()) throw std::runtime_error("Choose an alignment body");
         GProp_GProps a,b;BRepGProp::VolumeProperties(shape,a);BRepGProp::VolumeProperties(tool,b);
         gp_Trsf tr;tr.SetTranslation(gp_Vec(a.CentreOfMass(),b.CentreOfMass()));
-        BRepBuilderAPI_Transform op(shape,tr,true);result=op.Shape();break;
+        BRepBuilderAPI_Transform op(shape,tr,true);result=op.Shape(); follow(op,result);break;
       }
       case 14: case 15: {
         if (face.IsNull()) { consumed[e.target]=true;remember();continue; }
@@ -238,10 +270,16 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
       if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid()) throw std::runtime_error("Edit produced invalid geometry");
       unsigned solids=0;for(TopExp_Explorer it(result,TopAbs_SOLID);it.More();it.Next())++solids;
       if (!solids) throw std::runtime_error("Edit removed all solid geometry");
+      if(!followed)result_names=surviving_names(input_names,result);
+      if(e.kind==9 || e.kind==10)name_split_branches(result_names,result,e);
+      name_generated(result_names,result,std::string(e.identity));
       if (e.copy && (e.kind==5 || e.kind==12 || e.kind==13)) {
         TopoDS_Compound copies; BRep_Builder builder; builder.MakeCompound(copies);
         builder.Add(copies,shape);builder.Add(copies,result);outputs[e.target].shape=copies;outputs[e.target].caps.clear();
-      } else { outputs[e.target].shape=result;outputs[e.target].caps.clear(); }
+        auto original=surviving_names(input_names,shape);
+        for(auto& name:result_names)name.key=std::string(e.identity)+"/copy/"+name.key;
+        original.insert(original.end(),result_names.begin(),result_names.end());outputs[e.target].names=std::move(original);
+      } else { outputs[e.target].shape=result;outputs[e.target].caps.clear();outputs[e.target].names=std::move(result_names); }
       remember();
     } catch(const Standard_Failure& error) {
       throw std::runtime_error("Solid edit "+std::to_string(n+1)+": "+error.GetMessageString());

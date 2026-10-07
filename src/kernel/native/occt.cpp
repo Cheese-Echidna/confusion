@@ -59,6 +59,16 @@
 #include <cmath>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_Ellipse.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <GeomAPI.hxx>
+#include <Geom2dAPI_InterCurveCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -94,15 +104,18 @@ struct Cap {
   uint32_t role;
   std::vector<TopoDS_Shape> faces;
 };
+struct NamedTopology { std::string key; std::vector<TopoDS_Shape> faces; };
 struct Output {
   TopoDS_Shape shape;
   std::vector<Cap> caps;
+  std::vector<NamedTopology> names;
 };
 // OCCT algorithms can update shared topology. Store detached shapes so later
 // operations cannot mutate previously cached results (including cap identities).
 static Output detached(const Output &source) {
   BRepBuilderAPI_Copy copy(source.shape, true, false);
-  Output output{copy.Shape(), source.caps};
+  Output output{copy.Shape(), source.caps, source.names};
+  for (auto &name : output.names) for(auto &face : name.faces) face=copy.ModifiedShape(face);
   for (auto &cap : output.caps) for (auto &face : cap.faces)
     face = copy.ModifiedShape(face);
   return output;
@@ -122,6 +135,7 @@ struct FeatureEntry {
 };
 struct EditEntry {
   std::string key;
+  std::string face_reference, tool_reference;
   std::vector<Output> outputs;
   std::vector<bool> consumed;
 };
@@ -135,6 +149,7 @@ ModelCache::ModelCache() : impl(std::make_unique<ModelCacheImpl>()) {}
 ModelCache::~ModelCache() = default;
 size_t ModelCache::reused_features() const { return impl->reused; }
 std::unique_ptr<ModelCache> new_model_cache() { return std::make_unique<ModelCache>(); }
+#include "naming.inc"
 #include "modify.inc"
 static Mesh mesh_shape(const TopoDS_Shape &shape,
                        const std::vector<Output> &outputs = {},
@@ -185,6 +200,12 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
                 FaceAnchor{result.faces, static_cast<uint32_t>(support),
                            cap.producer, cap.role, cap.faces.size() != 1});
     }
+    for(size_t body=0;body<outputs.size();++body)if(!consumed[body]) {
+      unsigned ancestors=0;for(const auto& name:outputs[body].names)for(const auto& f:name.faces)if(f.IsSame(face)){++ancestors;break;}
+      for(const auto& name:outputs[body].names)for(const auto& f:name.faces)if(f.IsSame(face)) {
+        result.names.push_back(NamedFace{result.faces,rust::String(name.key),name.faces.size()!=1||(ancestors>1&&name.key.find("/branch/")==std::string::npos)});break;
+      }
+    }
     for (int t = 1; t <= triangles->NbTriangles(); ++t) {
       int a, b, c;
       triangles->Triangle(t).Get(a, b, c);
@@ -207,7 +228,60 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
   }
   return result;
 }
-static TopoDS_Face profile_face(rust::Slice<const ProfileEdge> edges) {
+struct ProfileCurve { Handle(Geom_Curve) curve; double offset=0, span=1; };
+static ProfileCurve profile_curve(const ProfileEdge& e) {
+  ProfileCurve result;
+  for(const auto& p:e.poles)if(!std::isfinite(p.x)||!std::isfinite(p.y))throw std::runtime_error("Invalid curve pole");
+  for(double v:{e.sx,e.sy,e.ex,e.ey,e.cx,e.cy,e.sweep,e.from,e.to})if(!std::isfinite(v))throw std::runtime_error("Invalid profile coordinate");
+  if(e.kind>3 || e.from<0 || e.from>1 || e.to<0 || e.to>1)throw std::runtime_error("Invalid curve range");
+  if(e.kind==0 && e.sweep!=0) {
+    const double radius=std::hypot(e.sx-e.cx,e.sy-e.cy)*1000;
+    if(radius<=1e-4 || std::abs(e.sweep)>tau+1e-8)throw std::runtime_error("Invalid circular edge");
+    result.curve=new Geom_Circle(gp_Ax2(gp_Pnt(e.cx*1000,e.cy*1000,0),gp_Dir(0,0,1)),radius);
+    // ProfileEdge circular coordinates already describe the trimmed arc.
+    result.offset=std::atan2(e.sy-e.cy,e.sx-e.cx);result.span=e.sweep;
+    return result;
+  }
+  if(e.kind==1) {
+    if(e.poles.size()!=3)throw std::runtime_error("Invalid ellipse profile");
+    const auto &c=e.poles[0],&a=e.poles[1],&b=e.poles[2];
+    double ra=std::hypot(a.x,a.y)*1000,rb=std::hypot(b.x,b.y)*1000;
+    if(ra<=1e-4 || rb<=1e-4 || std::abs(a.x*b.x+a.y*b.y)>1e-8*ra*rb/1e6)throw std::runtime_error("Invalid ellipse axes");
+    double normal=a.x*b.y-a.y*b.x>0?1:-1;
+    if(ra>=rb) {result.curve=new Geom_Ellipse(gp_Ax2(gp_Pnt(c.x*1000,c.y*1000,0),gp_Dir(0,0,normal),gp_Dir(a.x,a.y,0)),ra,rb);result.span=tau;}
+    else {result.curve=new Geom_Ellipse(gp_Ax2(gp_Pnt(c.x*1000,c.y*1000,0),gp_Dir(0,0,-normal),gp_Dir(b.x,b.y,0)),rb,ra);result.offset=tau/4;result.span=-tau;}
+    return result;
+  }
+  const size_t count=e.kind==0?2:e.poles.size();
+  if(count<2 || count>32)throw std::runtime_error("Invalid curve pole count");
+  TColgp_Array1OfPnt poles(1,count);
+  if(e.kind==0){poles.SetValue(1,gp_Pnt(e.sx*1000,e.sy*1000,0));poles.SetValue(2,gp_Pnt(e.ex*1000,e.ey*1000,0));}
+  else for(size_t i=0;i<count;++i){if(!std::isfinite(e.poles[i].x)||!std::isfinite(e.poles[i].y))throw std::runtime_error("Invalid curve pole");poles.SetValue(i+1,gp_Pnt(e.poles[i].x*1000,e.poles[i].y*1000,0));}
+  if(e.kind==0 || e.kind==2)result.curve=new Geom_BezierCurve(poles);
+  else {
+    int degree=std::min(3,int(count)-1),distinct=count-degree+1;
+    TColStd_Array1OfReal knots(1,distinct);TColStd_Array1OfInteger mults(1,distinct);
+    for(int i=1;i<=distinct;++i){knots.SetValue(i,double(i-1)/(distinct-1));mults.SetValue(i,i==1||i==distinct?degree+1:1);}
+    result.curve=new Geom_BSplineCurve(poles,knots,mults,degree);
+  } return result;
+}
+rust::Vec<CurveIntersection> profile_intersections(const ProfileEdge& a,const ProfileEdge& b,bool same) {
+  try {
+    auto first=profile_curve(a),second=profile_curve(b);
+    auto planar=[](const ProfileCurve& c){Handle(Geom_Curve) trimmed=new Geom_TrimmedCurve(c.curve,std::min(c.offset,c.offset+c.span),std::max(c.offset,c.offset+c.span));return GeomAPI::To2d(trimmed,gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,0,1)));};
+    Geom2dAPI_InterCurveCurve intersections;
+    if(same)intersections.Init(planar(first),1e-7);else intersections.Init(planar(first),planar(second),1e-7);
+    const auto& result=intersections.Intersector();
+    if(!result.IsDone())throw std::runtime_error("Could not intersect sketch curves");
+    rust::Vec<CurveIntersection> hits;
+    auto parameter=[](double value,const ProfileCurve& curve,uint32_t kind){double t=(value-curve.offset)/curve.span;if(kind==1 || (kind==0 && std::abs(curve.span)>1e-12 && curve.curve->IsPeriodic())){double period=tau/std::abs(curve.span);t=std::fmod(t,period);if(t<0)t+=period;}return t;};
+    auto add=[&](const IntRes2d_IntersectionPoint& p){double t=parameter(p.ParamOnFirst(),first,a.kind),u=parameter(p.ParamOnSecond(),second,b.kind);if(t>=-1e-8&&t<=1+1e-8&&u>=-1e-8&&u<=1+1e-8)hits.push_back({std::clamp(t,0.,1.),std::clamp(u,0.,1.)});};
+    for(int i=1;i<=result.NbPoints();++i)add(result.Point(i));
+    for(int i=1;i<=result.NbSegments();++i){const auto& segment=result.Segment(i);if(segment.HasFirstPoint())add(segment.FirstPoint());if(segment.HasLastPoint())add(segment.LastPoint());}
+    return hits;
+  } catch(const Standard_Failure& error){throw std::runtime_error(error.GetMessageString());}
+}
+static TopoDS_Face profile_face(rust::Slice<const ProfileEdge> edges, std::vector<std::pair<std::string,TopoDS_Shape>>* named=nullptr) {
   if (edges.size() == 0)
     throw std::runtime_error("Empty profile");
   BRepBuilderAPI_MakeFace face;
@@ -217,35 +291,22 @@ static TopoDS_Face profile_face(rust::Slice<const ProfileEdge> edges) {
     BRepBuilderAPI_MakeWire wire;
     while (index < edges.size() && edges[index].wire == wireIndex) {
       const auto &e = edges[index++];
-      for (double v : {e.sx, e.sy, e.ex, e.ey, e.cx, e.cy, e.sweep})
-        if (!std::isfinite(v))
-          throw std::runtime_error("Invalid profile coordinate");
-      gp_Pnt a(e.sx * 1000, e.sy * 1000, 0), b(e.ex * 1000, e.ey * 1000, 0);
-      if (e.sweep == 0) {
-        BRepBuilderAPI_MakeEdge edge(a, b);
-        if (!edge.IsDone())
-          throw std::runtime_error("Invalid line edge");
-        wire.Add(edge.Edge());
+      for(double v:{e.sx,e.sy,e.ex,e.ey,e.cx,e.cy,e.sweep})if(!std::isfinite(v))throw std::runtime_error("Invalid profile coordinate");
+      if(e.kind==0 && e.sweep==0) {
+        BRepBuilderAPI_MakeEdge maker(gp_Pnt(e.sx*1000,e.sy*1000,0),gp_Pnt(e.ex*1000,e.ey*1000,0));
+        if(!maker.IsDone())throw std::runtime_error("Invalid line edge");
+        wire.Add(maker.Edge());
       } else {
-        double radius = std::hypot(e.sx - e.cx, e.sy - e.cy) * 1000;
-        if (radius <= 1e-4 || std::abs(e.sweep) > tau + 1e-8)
-          throw std::runtime_error("Invalid circular edge");
-        gp_Circ circle(
-            gp_Ax2(gp_Pnt(e.cx * 1000, e.cy * 1000, 0), gp_Dir(0, 0, 1)),
-            radius);
-        double start = std::atan2(e.sy - e.cy, e.sx - e.cx),
-               end = start + e.sweep;
-        BRepBuilderAPI_MakeEdge maker(circle, std::min(start, end),
-                                      std::max(start, end));
-        if (!maker.IsDone())
-          throw std::runtime_error("Invalid arc edge");
-        auto edge = maker.Edge();
-        if (e.sweep < 0)
-          edge.Reverse();
-        wire.Add(edge);
+      auto geometry=profile_curve(e);
+      double from=e.kind==0?0:e.from,to=e.kind==0?1:e.to;
+      double start=geometry.offset+geometry.span*from,end=geometry.offset+geometry.span*to;
+      BRepBuilderAPI_MakeEdge maker(geometry.curve,std::min(start,end),std::max(start,end));
+      if(!maker.IsDone())throw std::runtime_error("Invalid profile edge");
+      auto edge=maker.Edge();if(end<start)edge.Reverse();wire.Add(edge);
       }
       if (!wire.IsDone())
         throw std::runtime_error("Could not connect profile edges");
+      if(named)named->emplace_back(std::string(e.identity),wire.Edge());
     }
     if (!wire.IsDone() || !wire.Wire().Closed())
       throw std::runtime_error("Profile wire is open");
@@ -383,8 +444,9 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
         if (step.operation > 3)
           throw std::runtime_error("Unknown extrusion operation");
         auto transform = attachment(step, outputs);
+        std::vector<std::pair<std::string,TopoDS_Shape>> profile_names;
         auto local = profile_face(rust::Slice<const ProfileEdge>(
-            edges.data() + step.edge_start, step.edge_count));
+            edges.data() + step.edge_start, step.edge_count), &profile_names);
         BRepBuilderAPI_Transform place(local, transform, true);
         if (!place.IsDone())
           throw std::runtime_error("Could not place sketch plane");
@@ -397,7 +459,15 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
           throw std::runtime_error("Extrusion failed");
         Output output{prism.Shape(),
                       {{static_cast<uint32_t>(index), 1, {prism.FirstShape()}},
-                       {static_cast<uint32_t>(index), 2, {prism.LastShape()}}}};
+                       {static_cast<uint32_t>(index), 2, {prism.LastShape()}}}, {}};
+        const std::string identity=step.identity.empty()?"extrusion/"+std::to_string(index):std::string(step.identity);
+        add_named(output.names,identity+"/cap/start",prism.FirstShape(),output.shape);
+        add_named(output.names,identity+"/cap/end",prism.LastShape(),output.shape);
+        for(size_t n=0;n<profile_names.size();++n) {
+          auto edge=place.ModifiedShape(profile_names[n].second);
+          const std::string source=profile_names[n].first.empty()?std::to_string(n):profile_names[n].first;
+          for(TopTools_ListIteratorOfListOfShape f(prism.Generated(edge));f.More();f.Next())add_named(output.names,identity+"/side/"+source,f.Value(),output.shape);
+        }
         check_solid(output.shape);
         // Prism history can return the source orientation. Use the outward
         // orientation of the corresponding face in the evaluated solid for
@@ -419,6 +489,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
               static_cast<size_t>(step.target) >= outputs.size() ||
               consumed[step.target])
             throw std::runtime_error("Missing or consumed target body");
+          auto names=outputs[step.target].names; names.insert(names.end(),output.names.begin(),output.names.end());
           auto caps = outputs[step.target].caps;
           caps.insert(caps.end(), output.caps.begin(), output.caps.end());
           GProp_GProps before, after;
@@ -430,6 +501,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
               throw std::runtime_error("Join failed");
             output.shape = op.Shape();
             output.caps = follow_caps(op, caps, output.shape);
+            output.names = follow_names(op, names, output.shape);
           } else {
             if (step.operation == 3) {
               BRepAlgoAPI_Common common; boolean_inputs(common,outputs[step.target].shape, output.shape);
@@ -444,6 +516,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
               throw std::runtime_error("Cut failed");
             output.shape = op.Shape();
             output.caps = follow_caps(op, caps, output.shape);
+            output.names = follow_names(op, names, output.shape);
           }
           check_solid(output.shape);
           BRepGProp::VolumeProperties(output.shape, after);
@@ -485,7 +558,8 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
                                  ": " + e.what());
       }
     }
-    apply_edits(outputs, consumed, edits, cache, keys, steps.size() + creates.size());
+    rust::Vec<BoundFaceReference> references;
+    apply_edits(outputs, consumed, edits, cache, keys, steps.size() + creates.size(),references);
     TopoDS_Compound combined;
     BRep_Builder builder;
     builder.MakeCompound(combined);
@@ -495,6 +569,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
     for (const auto &piece : pieces) builder.Add(combined, piece.second);
     check_cancelled();
     auto result = mesh_shape(combined, outputs, consumed, pieces);
+    result.references=std::move(references);
     std::vector<TopoDS_Shape> inspection_bodies;
     for (size_t i = 0; i < outputs.size(); ++i)
       if (!consumed[i]) inspection_bodies.push_back(outputs[i].shape);

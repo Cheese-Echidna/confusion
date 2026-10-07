@@ -123,6 +123,8 @@ mod native {
             target: id,
             tool: None,
             face: 0,
+            face_reference: None,
+            tool_reference: None,
             values: [2., 0., 0., 0.],
             parameters: [None; 4],
             copy: false,

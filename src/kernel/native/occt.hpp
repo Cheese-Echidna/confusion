@@ -4,6 +4,7 @@
 #include "rust/cxx.h"
 namespace confusion {
 struct ProfileEdge;
+struct CurveIntersection;
 struct FaceRequest;
 struct Mesh;
 struct ModifyStep;
@@ -14,9 +15,11 @@ Mesh evaluate_create_model(rust::Slice<const ProfileEdge>, rust::Slice<const Mod
 struct FaceRequest;
 struct Mesh;
 struct ProfileEdge;
+struct CurveIntersection;
 Mesh evaluate_model(rust::Slice<const ProfileEdge>,
                     rust::Slice<const ModelStep>,
                     rust::Slice<const FaceRequest>);
+rust::Vec<CurveIntersection> profile_intersections(const ProfileEdge&, const ProfileEdge&, bool);
 Mesh extrude_region(rust::Slice<const ProfileEdge>, double);
 struct Point2;
 struct Mesh;

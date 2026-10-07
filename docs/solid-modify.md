@@ -30,8 +30,15 @@ scale factors and cutting-plane normals accept scalar expressions.
 
 Edits evaluate after extrusion and Solid/Create features, in their stored order.
 Copies and split portions remain grouped under their source body. Face references
-use deterministic evaluated face ordinals; topology-changing upstream edits may
-require reselecting a face. These controls do not yet offer individual-edge picking,
+now persist feature/boundary provenance names. Native Boolean, fillet, shell, draft,
+transform and split history carries those names through regeneration. Deleted or
+ambiguous split/merged faces report an explicit repair error. Reopen the Modify
+feature from the timeline to view the model immediately before it, select the
+replacement face, and Apply. Plane splits expose positive/negative branch names
+for that repair. Legacy ordinals are upgraded to names after successful desktop
+evaluation when their provenance is unique. Operations without a face input do
+not create a face dependency. Generic generated-face naming is conservative: faces
+with indistinguishable provenance remain ambiguous. These controls do not yet offer individual-edge picking,
 variable-radius fillets, arbitrary-axis movement, face-to-face alignment, curved
 face replacement, or general surface deformation. Material density is document
 metadata; appearance uses a solid color without texture or reflectance controls.

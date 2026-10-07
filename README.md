@@ -34,8 +34,8 @@ Choose **Create sketch**, then use **R**, **L**, or **C** to draw geometry. Use 
 to add driving dimensions, constraint tools to define relationships, and **I** to
 measure selections. Drag points and lines to edit under constraints. The sketch
 menus also include arcs, ellipses, splines, slots, trim, offset, and transforms.
-Press **E** to extrude a closed line, circle, or arc region, including holes. Select a boundary curve first when choosing among multiple regions. Open and Save use a local
-path editor. Select a planar extrusion cap, choose **Create sketch**, then extrude with **Cut** to create a face-attached pocket. Ellipse/spline extrusion and complete Fusion parity remain unfinished.
+Click inside a bounded sketch region to select it, then press **E** to extrude it, including holes. Regions support lines, circles, arcs, ellipses, and fit/control splines; crossing curves and shared edges subdivide the selectable faces. Open and Save use a local
+path editor. Select a planar extrusion cap, choose **Create sketch**, then extrude with **Cut** to create a face-attached pocket. Complete Fusion parity remains unfinished.
 See the [UI guide](docs/user-interface.md) and
 [workflow guide](docs/parametric-workflow.md) for controls and current limits.
 

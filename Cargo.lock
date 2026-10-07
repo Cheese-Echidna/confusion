@@ -2459,7 +2459,6 @@ dependencies = [
 [[package]]
 name = "gpui-ce"
 version = "1.0.0"
-source = "git+https://github.com/nestrilabs/wgpui?rev=baa3f3b00839ee9567b81450f45a58c3a6c43cb8#baa3f3b00839ee9567b81450f45a58c3a6c43cb8"
 dependencies = [
  "anyhow",
  "arboard",

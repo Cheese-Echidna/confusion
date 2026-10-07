@@ -6,6 +6,14 @@ use crate::kernel::cancellation::{EvaluationCancellation, evaluation_cancelled};
 #[cfg(feature = "kernel")]
 #[cxx::bridge(namespace = "confusion")]
 pub mod ffi {
+    struct CurveIntersection {
+        first: f64,
+        second: f64,
+    }
+    struct ProfilePoint {
+        x: f64,
+        y: f64,
+    }
     struct ProfileEdge {
         wire: u32,
         sx: f64,
@@ -15,8 +23,14 @@ pub mod ffi {
         cx: f64,
         cy: f64,
         sweep: f64,
+        kind: u32,
+        poles: Vec<ProfilePoint>,
+        identity: String,
+        from: f64,
+        to: f64,
     }
     struct ModelStep {
+        identity: String,
         edge_start: u32,
         edge_count: u32,
         depth: f64,
@@ -27,6 +41,9 @@ pub mod ffi {
         role: u32,
     }
     struct ModifyStep {
+        identity: String,
+        face_reference: String,
+        tool_reference: String,
         kind: u32,
         target: u32,
         tool: i32,
@@ -39,6 +56,7 @@ pub mod ffi {
         mode: u32,
     }
     struct CreateStep {
+        identity: String,
         kind: u32,
         edge_start: u32,
         edge_count: u32,
@@ -125,7 +143,21 @@ pub mod ffi {
         error: String,
     }
     #[derive(Clone)]
+    struct BoundFaceReference {
+        edit: String,
+        face: String,
+        tool: String,
+    }
+    #[derive(Clone)]
+    struct NamedFace {
+        face: u32,
+        key: String,
+        ambiguous: bool,
+    }
+    #[derive(Clone)]
     struct Mesh {
+        names: Vec<NamedFace>,
+        references: Vec<BoundFaceReference>,
         inspection: Inspection,
         planes: Vec<PlaneFrame>,
         bodies: Vec<BodyFace>,
@@ -189,6 +221,11 @@ pub mod ffi {
             planes: &[FaceRequest],
             creates: &[CreateStep],
         ) -> Result<Mesh>;
+        fn profile_intersections(
+            first: &ProfileEdge,
+            second: &ProfileEdge,
+            same: bool,
+        ) -> Result<Vec<CurveIntersection>>;
         fn extrude_region(edges: &[ProfileEdge], depth: f64) -> Result<Mesh>;
         fn extrude(profile: &[Point2], depth: f64) -> Result<Mesh>;
     }

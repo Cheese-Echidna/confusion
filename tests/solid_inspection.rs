@@ -16,11 +16,17 @@ fn edges(x: f64) -> Vec<ffi::ProfileEdge> {
             cx: 0.,
             cy: 0.,
             sweep: 0.,
+            kind: 0,
+            poles: vec![],
+            identity: String::new(),
+            from: 0.,
+            to: 1.,
         })
         .collect()
 }
 fn step(start: u32) -> ffi::ModelStep {
     ffi::ModelStep {
+        identity: String::new(),
         edge_start: start,
         edge_count: 4,
         depth: 0.005,
@@ -82,6 +88,11 @@ fn cylinder_curvature_uses_inverse_metres() {
         cx: 0.,
         cy: 0.,
         sweep: std::f64::consts::TAU,
+        kind: 0,
+        poles: vec![],
+        identity: String::new(),
+        from: 0.,
+        to: 1.,
     }];
     let mesh = ffi::extrude_region(&circle, 0.005).unwrap();
     let side = mesh

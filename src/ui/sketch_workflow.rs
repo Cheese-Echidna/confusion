@@ -167,6 +167,9 @@ impl WorkspaceView {
                 return;
             }
             let hit = point_hit.or(curve);
+            if self.tool == Tool::Select {
+                self.sketch_region = None;
+            }
             if !additive
                 && self.tool == Tool::Select
                 && hit.is_none_or(|id| !self.selection.contains(&id))
@@ -174,6 +177,7 @@ impl WorkspaceView {
                 self.selection.clear()
             }
             if let Some(id) = hit {
+                self.sketch_region = None;
                 if let Some(i) = self.selection.iter().position(|p| *p == id) {
                     if additive {
                         self.selection.remove(i);
@@ -205,7 +209,7 @@ impl WorkspaceView {
                 let xy: Vec<_> = d.points.iter().map(|p| p.xy).collect();
                 if let Ok(Some(region)) = crate::sketch::regions::at(&d, &xy, at) {
                     self.sketch_region = Some(region.clone());
-                    for id in region.boundary {
+                    for id in region.curves {
                         if !self.selection.contains(&id) {
                             self.selection.push(id);
                         }

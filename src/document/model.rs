@@ -313,10 +313,10 @@ impl Design {
             let curves = crate::sketch::entities::curve_ids(&input);
             let unique: HashSet<_> = feature.boundary.iter().collect();
             if unique.len() != feature.boundary.len()
-                || feature
-                    .boundary
-                    .iter()
-                    .any(|id| !curves.contains(id) || input.construction_geometry.contains(id))
+                || feature.boundary.iter().any(|id| {
+                    (!curves.contains(id) && !crate::sketch::regions::is_boundary_token(id))
+                        || input.construction_geometry.contains(id)
+                })
             {
                 return Err("Missing or invalid extrusion boundary".into());
             }

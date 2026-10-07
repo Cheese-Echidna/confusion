@@ -55,6 +55,11 @@ mod tests {
                 cx: 0.,
                 cy: 0.,
                 sweep: 0.,
+                kind: 0,
+                poles: vec![],
+                identity: String::new(),
+                from: 0.,
+                to: 1.,
             });
         }
     }
@@ -65,6 +70,7 @@ mod tests {
         rectangle(&mut edges, 0.01, 0.01, 0.02, 0.01);
         let steps = vec![
             ffi::ModelStep {
+                identity: String::new(),
                 edge_start: 0,
                 edge_count: 4,
                 depth: 0.01,
@@ -75,6 +81,7 @@ mod tests {
                 role: 0,
             },
             ffi::ModelStep {
+                identity: String::new(),
                 edge_start: 4,
                 edge_count: 4,
                 depth: 0.003,

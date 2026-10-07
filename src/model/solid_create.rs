@@ -434,9 +434,10 @@ impl Design {
                 let curves = crate::sketch::entities::curve_ids(&input);
                 let unique: HashSet<_> = f.boundary.iter().collect();
                 if unique.len() != f.boundary.len()
-                    || f.boundary
-                        .iter()
-                        .any(|id| !curves.contains(id) || input.construction_geometry.contains(id))
+                    || f.boundary.iter().any(|id| {
+                        (!curves.contains(id) && !crate::sketch::regions::is_boundary_token(id))
+                            || input.construction_geometry.contains(id)
+                    })
                 {
                     return Err("Invalid Create profile boundary".into());
                 }

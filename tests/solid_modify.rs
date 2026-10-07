@@ -24,6 +24,8 @@ fn edit(target: Uuid, kind: ModifyKind, face: u32, values: [f64; 4]) -> SolidEdi
         target,
         tool: None,
         face,
+        face_reference: None,
+        tool_reference: None,
         values,
         parameters: [None; 4],
         copy: false,
