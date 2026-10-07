@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[derive(Clone, Copy)]
 struct Value {
     n: f64,
-    dimension: i32,
+    dimension: [i32; 2],
 }
 struct Parser<'a> {
     source: &'a [u8],
@@ -57,7 +57,7 @@ fn resolve(
     let v = parser.sum()?;
     parser.space();
     if parser.offset != parser.source.len()
-        || v.dimension != 1
+        || v.dimension != if p.angular { [0, 1] } else { [1, 0] }
         || !v.n.is_finite()
         || v.n.abs() > 1000.
     {
@@ -108,7 +108,7 @@ impl Parser<'_> {
         Ok(v)
     }
     fn product(&mut self) -> Result<Value, String> {
-        let mut v = self.atom()?;
+        let mut v = self.power()?;
         loop {
             let divide = if self.take(b'*') {
                 false
@@ -117,16 +117,28 @@ impl Parser<'_> {
             } else {
                 break;
             };
-            let r = self.atom()?;
+            let r = self.power()?;
             if divide {
                 v.n /= r.n;
-                v.dimension -= r.dimension;
+                v.dimension = std::array::from_fn(|i| v.dimension[i] - r.dimension[i]);
             } else {
                 v.n *= r.n;
-                v.dimension += r.dimension;
+                v.dimension = std::array::from_fn(|i| v.dimension[i] + r.dimension[i]);
             }
         }
         Ok(v)
+    }
+    fn power(&mut self) -> Result<Value, String> {
+        let mut value = self.atom()?;
+        if self.take(b'^') {
+            let exponent = self.atom()?;
+            if exponent.dimension != [0, 0] || exponent.n.fract() != 0. || exponent.n.abs() > 16. {
+                return Err("Exponent must be a bounded integer scalar".into());
+            }
+            value.n = value.n.powf(exponent.n);
+            value.dimension = value.dimension.map(|power| power * exponent.n as i32);
+        }
+        Ok(value)
     }
     fn atom(&mut self) -> Result<Value, String> {
         if self.depth >= 64 {
@@ -182,16 +194,35 @@ impl Parser<'_> {
             }
             let unit = std::str::from_utf8(&self.source[unit_start..self.offset]).unwrap();
             let factor = match unit {
-                "" => return Ok(Value { n, dimension: 0 }),
+                "" => {
+                    return Ok(Value {
+                        n,
+                        dimension: [0, 0],
+                    });
+                }
                 "mm" => 0.001,
                 "cm" => 0.01,
                 "m" => 1.,
+                "deg" => {
+                    return Ok(Value {
+                        n: n.to_radians(),
+                        dimension: [0, 1],
+                    });
+                }
+                "rad" => {
+                    return Ok(Value {
+                        n,
+                        dimension: [0, 1],
+                    });
+                }
                 "in" => 0.0254,
+                "ft" => 0.3048,
+                "um" => 1e-6,
                 _ => return Err(format!("Unknown unit {unit}")),
             };
             return Ok(Value {
                 n: n * factor,
-                dimension: 1,
+                dimension: [1, 0],
             });
         }
         while self
@@ -206,6 +237,72 @@ impl Parser<'_> {
         }
         let name =
             std::str::from_utf8(&self.source[start..self.offset]).map_err(|_| "Invalid name")?;
+        if self.take(b'(') {
+            let value = self.sum()?;
+            let second = if self.take(b',') {
+                Some(self.sum()?)
+            } else {
+                None
+            };
+            if !self.take(b')') {
+                return Err("Missing function closing parenthesis".into());
+            }
+            if let Some(second) = second {
+                if value.dimension != second.dimension {
+                    return Err("Function arguments need matching units".into());
+                }
+                return match name {
+                    "min" => Ok(Value {
+                        n: value.n.min(second.n),
+                        dimension: value.dimension,
+                    }),
+                    "max" => Ok(Value {
+                        n: value.n.max(second.n),
+                        dimension: value.dimension,
+                    }),
+                    _ => Err(format!("Unknown two-argument function {name}")),
+                };
+            }
+            return match name {
+                "sqrt" if value.dimension.iter().all(|p| p % 2 == 0) && value.n >= 0. => {
+                    Ok(Value {
+                        n: value.n.sqrt(),
+                        dimension: value.dimension.map(|p| p / 2),
+                    })
+                }
+                "abs" => Ok(Value {
+                    n: value.n.abs(),
+                    dimension: value.dimension,
+                }),
+                "sin" | "cos" | "tan" if value.dimension == [0, 1] || value.dimension == [0, 0] => {
+                    Ok(Value {
+                        n: match name {
+                            "sin" => value.n.sin(),
+                            "cos" => value.n.cos(),
+                            _ => value.n.tan(),
+                        },
+                        dimension: [0, 0],
+                    })
+                }
+                "asin" | "acos" | "atan" if value.dimension == [0, 0] => Ok(Value {
+                    n: match name {
+                        "asin" => value.n.asin(),
+                        "acos" => value.n.acos(),
+                        _ => value.n.atan(),
+                    },
+                    dimension: [0, 1],
+                }),
+                _ => Err(format!(
+                    "Unsupported function or incompatible units for {name}"
+                )),
+            };
+        }
+        if name == "pi" && !self.design.parameters.iter().any(|p| p.name == name) {
+            return Ok(Value {
+                n: std::f64::consts::PI,
+                dimension: [0, 0],
+            });
+        }
         let id = self
             .design
             .parameters
@@ -215,7 +312,32 @@ impl Parser<'_> {
             .id;
         Ok(Value {
             n: resolve(id, self.design, self.active, self.cache)?,
-            dimension: 1,
+            dimension: if self
+                .design
+                .parameters
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .angular
+            {
+                [0, 1]
+            } else {
+                [1, 0]
+            },
         })
+    }
+}
+
+/// UI defaults numeric input to millimetres/degrees; stored intent always carries units.
+/// Named or explicitly unit-bearing expressions retain their dimensional semantics.
+pub fn dimension_input(source: &str, angular: bool) -> String {
+    if !source.trim().is_empty()
+        && source
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_whitespace() || b".+-*/()".contains(&b))
+    {
+        format!("({source}) * 1 {}", if angular { "deg" } else { "mm" })
+    } else {
+        source.to_owned()
     }
 }

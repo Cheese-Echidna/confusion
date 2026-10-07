@@ -67,6 +67,7 @@ fn exact_extrusion_regenerates_after_dimension_edit_and_reopen() {
     let mut d = rectangle();
     let depth = d.parameter("depth", "10 mm".into());
     d.extrusion = Some(confusion::document::schema::Extrusion {
+        boundary: vec![],
         id: uuid::Uuid::new_v4(),
         depth,
     });
@@ -155,6 +156,7 @@ fn background_latest_revision_regenerates_and_kernel_errors_are_results() {
     let mut d = rectangle();
     let depth = d.parameter("depth", "10 mm".into());
     d.extrusion = Some(confusion::document::schema::Extrusion {
+        boundary: vec![],
         id: uuid::Uuid::new_v4(),
         depth,
     });
@@ -190,6 +192,7 @@ fn construction_survives_reopen_without_parameter_edit_history() {
     let mut design = rectangle();
     let depth = design.parameter("depth", "10 mm".into());
     design.extrusion = Some(Extrusion {
+        boundary: vec![],
         id: uuid::Uuid::new_v4(),
         depth,
     });
@@ -268,6 +271,7 @@ fn legacy_files_gain_construction_without_edit_history() {
     let mut design = rectangle();
     let depth = design.parameter("depth", "10 mm".into());
     design.extrusion = Some(confusion::document::schema::Extrusion {
+        boundary: vec![],
         id: uuid::Uuid::new_v4(),
         depth,
     });
@@ -301,7 +305,7 @@ fn tool_catalog_has_unique_ids_existing_icons_and_unavailable_drawings() {
             for feature in group.features {
                 assert!(ids.insert(feature.id), "duplicate {}", feature.id);
                 let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("librecad_svg_icons")
+                    .join("assets/icons/librecad_svg_icons")
                     .join(format!("{}.svg", feature.icon));
                 assert!(path.is_file(), "missing {}", feature.icon);
                 if mode == Mode::Drawing {

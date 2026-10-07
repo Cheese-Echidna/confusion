@@ -4,7 +4,7 @@
 #[cfg(all(feature = "solver", feature = "kernel"))]
 mod implementation {
     use crate::{
-        document::schema::Design, kernel::bridge::ffi, parameters::expression, sketch::profiles,
+        document::schema::Design, kernel::bridge::ffi, parameters::expression, sketch::regions,
         solver::nonlinear,
     };
     use std::sync::{Arc, Condvar, Mutex};
@@ -73,17 +73,11 @@ mod implementation {
                                         solution.conflicts.len()
                                     ))
                                 } else if let Some(extrusion) = &design.extrusion {
-                                    profiles::closed_profile(&design, &solution.points).and_then(
-                                        |p| {
-                                            let points: Vec<_> = p
-                                                .into_iter()
-                                                .map(|p| ffi::Point2 { x: p[0], y: p[1] })
-                                                .collect();
-                                            ffi::extrude(&points, parameters[&extrusion.depth])
-                                                .map(Some)
-                                                .map_err(|e| e.to_string())
-                                        },
-                                    )
+                                    regions::select(&design, &solution.points, &extrusion.boundary)
+                                        .and_then(|r| {
+                                            regions::extrude(&r, parameters[&extrusion.depth])
+                                        })
+                                        .map(Some)
                                 } else {
                                     Ok(None)
                                 }

@@ -4,6 +4,16 @@
 #[cfg(feature = "kernel")]
 #[cxx::bridge(namespace = "confusion")]
 pub mod ffi {
+    struct ProfileEdge {
+        wire: u32,
+        sx: f64,
+        sy: f64,
+        ex: f64,
+        ey: f64,
+        cx: f64,
+        cy: f64,
+        sweep: f64,
+    }
     struct Point2 {
         x: f64,
         y: f64,
@@ -25,6 +35,7 @@ pub mod ffi {
     }
     unsafe extern "C++" {
         include!("src/kernel/native/occt.hpp");
+        fn extrude_region(edges: &[ProfileEdge], depth: f64) -> Result<Mesh>;
         fn extrude(profile: &[Point2], depth: f64) -> Result<Mesh>;
     }
 }

@@ -25,7 +25,6 @@ struct FragmentOutput {
     @location(0) color: vec4<f32>,
     @location(1) face: u32,
 }
-@fragment
 fn fragment_main(input: VertexOutput) -> FragmentOutput {
     let normal = normalize(input.normal);
     let diffuse = max(dot(normal, normalize(vec3<f32>(0.4, -0.5, 1.0))), 0.0);
@@ -33,12 +32,17 @@ fn fragment_main(input: VertexOutput) -> FragmentOutput {
                       input.face == uniforms.selection.x);
     var output: FragmentOutput;
     let linear = base * (0.38 + diffuse * 0.62);
-    // GPUI's compositor expects encoded colors on an unorm swapchain. Standalone
-    // sRGB targets encode in hardware; unorm surfaces need exactly one shader encoding.
-    let encoded = select(linear * 12.92,
-                         1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055,
-                         linear > vec3<f32>(0.0031308));
-    output.color = vec4<f32>(select(linear, encoded, uniforms.selection.y != 0u), 1.0);
+    // Encode only after multisample coverage is resolved in linear light.
+    output.color = vec4<f32>(linear, 1.0);
     output.face = input.face;
     return output;
+}
+
+@fragment
+fn fragment_color(input: VertexOutput) -> @location(0) vec4<f32> {
+    return fragment_main(input).color;
+}
+@fragment
+fn fragment_pick(input: VertexOutput) -> @location(0) u32 {
+    return input.face;
 }

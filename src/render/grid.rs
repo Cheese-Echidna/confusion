@@ -1,6 +1,6 @@
 //! Depth-tested XY ground grid on the shared GPU render pass, with Z-up axis colors.
 //! Exports GridRenderer behind gpu; viewport renderer controls visibility independently
-//! of sketch snapping. It writes pick ID zero and never becomes selectable geometry.
+//! of sketch snapping. It shares the 4x MSAA color pass and never writes face IDs.
 #[cfg(feature = "gpu")]
 mod implementation {
     use wgpu::util::DeviceExt;
@@ -46,18 +46,11 @@ mod implementation {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fragment_main"),
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::R32Uint,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                    ],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -71,7 +64,10 @@ mod implementation {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState {
+                    count: 4,
+                    ..Default::default()
+                },
                 multiview_mask: None,
                 cache: None,
             });

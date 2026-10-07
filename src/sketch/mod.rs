@@ -15,3 +15,5 @@ pub mod inference;
 pub mod profiles;
 pub mod projection;
 pub mod workplane;
+
+pub mod regions;

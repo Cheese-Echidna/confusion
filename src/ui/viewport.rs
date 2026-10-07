@@ -1,7 +1,8 @@
-//! Interactive planar sketch and parametric solid workspace with shared-device rendering.
+//! Multi-document CAD shell with a floating browser, pinned tools and construction marker.
 //!
 //! Exports WorkspaceView behind desktop. Connections: application/bootstrap creates
 //! the view, render/gpui_bridge owns compositor integration, camera handles navigation.
+//! Tab snapshots retain independent design/undo/view state; settings/store persists toolbar pins.
 //! UI coordinates are normalized against actual layout bounds before GPU picking.
 
 #[cfg(feature = "desktop")]
@@ -34,6 +35,11 @@ mod implementation {
         Extrude,
         Dimension,
         View,
+        Measure,
+        Offset,
+        Search,
+        Transform,
+        Fillet,
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -41,11 +47,46 @@ mod implementation {
         Select,
         Line,
         Rectangle,
+        Circle,
+        Circle2,
+        Circle3,
+        Arc3,
+        Ellipse,
+        Polygon,
+        Slot,
+        Spline,
+        CenterRectangle,
+        Arc,
+        Point,
+        Dimension,
+        Measure,
+        Break,
+        Trim,
+        Extend,
     }
 
+    struct SketchDrag {
+        before: Design,
+        points: Vec<Uuid>,
+        start: [f64; 2],
+        moved: bool,
+    }
     struct Drag {
         button: MouseButton,
         previous: Point<Pixels>,
+    }
+
+    #[derive(Clone)]
+    struct DocumentTab {
+        design: Design,
+        undo: Vec<Design>,
+        redo: Vec<Design>,
+        path: String,
+        saved_path: Option<PathBuf>,
+        mode: Mode,
+        camera: Camera,
+        scale: f64,
+        center: [f64; 2],
     }
 
     pub struct WorkspaceView {
@@ -92,12 +133,43 @@ mod implementation {
         cube_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
         menu_x: f32,
         before_construction: bool,
+        documents: Vec<DocumentTab>,
+        active_document: usize,
+        pinned: HashSet<&'static str>,
+        timeline_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+        timeline_drag: bool,
+        selection: Vec<Uuid>,
+        point_dof: Vec<usize>,
+        sketch_drag: Option<SketchDrag>,
+        arc_start: Option<[f64; 2]>,
+        keymap: crate::settings::keymap::Keymap,
+        reference_dimension: bool,
+        dimension_edit: Option<Uuid>,
+        dimension_position: Option<[f64; 2]>,
+        search: Entity<TextInput>,
+        tool_points: Vec<[f64; 2]>,
+        transform_action: Action,
+        transform_x: Entity<TextInput>,
+        transform_y: Entity<TextInput>,
+        transform_angle: Entity<TextInput>,
+        transform_count: Entity<TextInput>,
+        transform_copy: bool,
+        marquee: Option<([f64; 2], [f64; 2], bool)>,
+        transform_rows: Entity<TextInput>,
+        show_constraints: bool,
+        show_dimensions: bool,
+        dimension_drag: Option<(Uuid, Design, bool)>,
     }
+
+    include!("sketch_workflow.rs");
 
     impl WorkspaceView {
         pub fn new(surface: WgpuSurfaceHandle, cx: &mut Context<Self>) -> Self {
+            let saved_pins = crate::settings::store::toolbar_pins();
             let mut gpu = GpuViewport::new(surface);
             gpu.set_mesh(&[], &[]);
+            let keymap = crate::settings::keymap::load();
+            let keymap_error = keymap.as_ref().err().cloned();
             Self {
                 gpu,
                 camera: Camera::default(),
@@ -107,7 +179,7 @@ mod implementation {
                 bounds: Rc::new(Cell::new(None)),
                 drag: None,
                 focus: cx.focus_handle(),
-                error: None,
+                error: keymap_error,
                 design: Design::default(),
                 worker: Worker::new(),
                 revision: 0,
@@ -142,6 +214,57 @@ mod implementation {
                 cube_bounds: Rc::new(Cell::new(None)),
                 menu_x: 12.,
                 before_construction: false,
+                documents: vec![DocumentTab {
+                    design: Design::default(),
+                    undo: vec![],
+                    redo: vec![],
+                    path: "Untitled.con".into(),
+                    saved_path: None,
+                    mode: Mode::Solid,
+                    camera: Camera::default(),
+                    scale: 6000.,
+                    center: [0.04, 0.025],
+                }],
+                active_document: 0,
+                pinned: [Mode::Solid, Mode::Sketch, Mode::Drawing]
+                    .into_iter()
+                    .flat_map(|m| {
+                        toolbar::groups(m).into_iter().flat_map(|g| {
+                            g.features
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, f)| {
+                                    saved_pins
+                                        .as_ref()
+                                        .map_or(*i < 3, |pins| pins.contains(f.id))
+                                })
+                                .map(|(_, f)| f.id)
+                        })
+                    })
+                    .collect(),
+                timeline_bounds: Rc::new(Cell::new(None)),
+                timeline_drag: false,
+                selection: vec![],
+                point_dof: vec![],
+                sketch_drag: None,
+                arc_start: None,
+                keymap: keymap.unwrap_or_default(),
+                reference_dimension: false,
+                dimension_edit: None,
+                dimension_position: None,
+                search: cx.new(|cx| TextInput::new("", cx)),
+                tool_points: vec![],
+                transform_action: Action::Move,
+                transform_x: cx.new(|cx| TextInput::new("10 mm", cx)),
+                transform_y: cx.new(|cx| TextInput::new("0 mm", cx)),
+                transform_angle: cx.new(|cx| TextInput::new("0 deg", cx)),
+                transform_count: cx.new(|cx| TextInput::new("3", cx)),
+                transform_copy: false,
+                marquee: None,
+                transform_rows: cx.new(|cx| TextInput::new("1", cx)),
+                show_constraints: true,
+                show_dimensions: true,
+                dimension_drag: None,
             }
         }
 
@@ -255,138 +378,49 @@ mod implementation {
                 .retain(|(id, _)| self.design.parameters.iter().any(|p| p.id == *id));
             cx.notify();
         }
-        fn screen_to_sketch(&self, position: Point<Pixels>) -> Option<[f64; 2]> {
-            let b = self.bounds.get()?;
-            let x = f64::from(position.x - b.origin.x - b.size.width * 0.5) / self.scale
-                + self.center[0];
-            let y = -f64::from(position.y - b.origin.y - b.size.height * 0.5) / self.scale
-                + self.center[1];
-            let point = if self.snap {
-                [(x * 1000.).round() * 0.001, (y * 1000.).round() * 0.001]
-            } else {
-                [x, y]
-            };
-            let coords = if self.solved.len() == self.design.points.len() {
+        fn extrude(&mut self, cx: &mut Context<Self>) {
+            let xy: Vec<_> = if self.solved.len() == self.design.points.len() {
                 self.solved.clone()
             } else {
                 self.design.points.iter().map(|p| p.xy).collect()
             };
-            Some(
-                coords
-                    .into_iter()
-                    .find(|p| (p[0] - x).hypot(p[1] - y) * self.scale < 8.)
-                    .unwrap_or(point),
-            )
-        }
-        fn sketch_click(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-            let Some(point) = self.screen_to_sketch(position) else {
-                return;
-            };
-            if self.tool == Tool::Select {
-                let coords = if self.solved.len() == self.design.points.len() {
-                    self.solved.clone()
-                } else {
-                    self.design.points.iter().map(|p| p.xy).collect()
-                };
-                self.line = self
-                    .design
-                    .lines
+            let region = crate::sketch::regions::regions(&self.design, &xy).and_then(|regions| {
+                let selected: Vec<_> = regions
                     .iter()
-                    .find(|l| {
-                        let [a, b] = l.ends.map(|id| {
-                            coords[self.design.points.iter().position(|p| p.id == id).unwrap()]
-                        });
-                        let dx = b[0] - a[0];
-                        let dy = b[1] - a[1];
-                        let t = (((point[0] - a[0]) * dx + (point[1] - a[1]) * dy)
-                            / (dx * dx + dy * dy))
-                            .clamp(0., 1.);
-                        (point[0] - a[0] - t * dx).hypot(point[1] - a[1] - t * dy) * self.scale < 8.
-                    })
-                    .map(|l| l.id);
-                cx.notify();
-                return;
-            }
-            if let Some(a) = self.anchor {
-                if (point[0] - a[0]).hypot(point[1] - a[1]) < 1e-6 {
+                    .filter(|r| r.boundary.iter().any(|id| self.selection.contains(id)))
+                    .collect();
+                if selected.len() == 1 {
+                    Ok(selected[0].clone())
+                } else if selected.is_empty() {
+                    let boundary = self
+                        .design
+                        .extrusion
+                        .as_ref()
+                        .map_or(&[][..], |e| e.boundary.as_slice());
+                    crate::sketch::regions::select(&self.design, &xy, boundary)
+                } else {
+                    Err("Select a boundary curve from one region before extruding".into())
+                }
+            });
+            let region = match region {
+                Ok(r) => r,
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
                     return;
                 }
-                self.checkpoint();
-                if self.solved.len() == self.design.points.len() {
-                    for (p, xy) in self.design.points.iter_mut().zip(&self.solved) {
-                        p.xy = *xy;
-                    }
-                }
-                if self.tool == Tool::Rectangle {
-                    if (point[0] - a[0]).abs() < 1e-6 || (point[1] - a[1]).abs() < 1e-6 {
-                        return;
-                    }
-                    self.design.rectangle(a, point);
-                    self.anchor = None;
-                    self.tool = Tool::Select;
-                } else {
-                    let id = self.design.line(a, point);
-                    if (point[1] - a[1]).abs() < 1e-6 {
-                        self.design
-                            .constrain(ConstraintKind::Horizontal { line: id });
-                    }
-                    if (point[0] - a[0]).abs() < 1e-6 {
-                        self.design.constrain(ConstraintKind::Vertical { line: id });
-                    }
-                    self.anchor = Some(point);
-                }
-                self.rebuild(cx);
-            } else {
-                self.anchor = Some(point);
-                cx.notify();
-            }
-        }
-        fn apply_constraint(&mut self, kind: u8, cx: &mut Context<Self>) {
-            let Some(id) = self.line else {
-                self.error = Some("Select a sketch line first".into());
-                return;
             };
             self.checkpoint();
-            let constraint = match kind {
-                0 => ConstraintKind::Horizontal { line: id },
-                1 => ConstraintKind::Vertical { line: id },
-                2 => {
-                    let point = self.design.lines.iter().find(|l| l.id == id).unwrap().ends[0];
-                    let i = self
-                        .design
-                        .points
-                        .iter()
-                        .position(|p| p.id == point)
-                        .unwrap();
-                    let xy = self
-                        .solved
-                        .get(i)
-                        .copied()
-                        .unwrap_or(self.design.points[i].xy);
-                    ConstraintKind::Fixed { point, xy }
-                }
-                _ => {
-                    let expression = self.dimension.read(cx).content.to_string();
-                    let n = self.design.parameters.len();
-                    let parameter = self.design.parameter(&format!("length{n}"), expression);
-                    ConstraintKind::Length {
-                        line: id,
-                        parameter,
-                    }
-                }
-            };
-            self.design.constrain(constraint);
-            self.rebuild(cx);
-        }
-        fn extrude(&mut self, cx: &mut Context<Self>) {
-            self.checkpoint();
-            let expression = self.depth.read(cx).content.to_string();
+            let expression =
+                crate::parameters::expression::dimension_input(&self.depth.read(cx).content, false);
             let depth = self.design.parameter("depth", expression);
             self.inputs.retain(|(id, _)| *id != depth);
             if let Some(e) = &mut self.design.extrusion {
                 e.depth = depth;
+                e.boundary = region.boundary.clone();
             } else {
                 self.design.extrusion = Some(Extrusion {
+                    boundary: region.boundary,
                     id: Uuid::new_v4(),
                     depth,
                 });
@@ -400,8 +434,81 @@ mod implementation {
             self.rebuild(cx);
             self.fit();
         }
+        fn stash_document(&mut self, cx: &App) {
+            self.documents[self.active_document] = DocumentTab {
+                design: self.design.clone(),
+                undo: self.undo.clone(),
+                redo: self.redo.clone(),
+                path: self.path.read(cx).content.to_string(),
+                saved_path: self.saved_path.clone(),
+                mode: self.mode,
+                camera: self.camera.clone(),
+                scale: self.scale,
+                center: self.center,
+            };
+        }
+        fn switch_document(&mut self, index: usize, cx: &mut Context<Self>) {
+            self.stash_document(cx);
+            self.active_document = index;
+            let tab = self.documents[index].clone();
+            self.design = tab.design;
+            self.undo = tab.undo;
+            self.redo = tab.redo;
+            self.saved_path = tab.saved_path;
+            self.path = cx.new(|cx| TextInput::new(&tab.path, cx));
+            self.mode = tab.mode;
+            self.sketch = self.mode == Mode::Sketch;
+            self.camera = tab.camera;
+            self.scale = tab.scale;
+            self.center = tab.center;
+            self.panel = None;
+            self.menu = None;
+            self.restore_edit(cx);
+        }
+        fn close_document(&mut self, index: usize, cx: &mut Context<Self>) {
+            self.stash_document(cx);
+            self.documents.remove(index);
+            if self.documents.is_empty() {
+                self.documents.push(DocumentTab {
+                    design: Design::default(),
+                    undo: vec![],
+                    redo: vec![],
+                    path: "Untitled.con".into(),
+                    saved_path: None,
+                    mode: Mode::Solid,
+                    camera: Camera::default(),
+                    scale: 6000.,
+                    center: [0.04, 0.025],
+                });
+            }
+            self.active_document = if index < self.active_document {
+                self.active_document - 1
+            } else {
+                self.active_document.min(self.documents.len() - 1)
+            };
+            let tab = self.documents[self.active_document].clone();
+            // Restore through the normal switching path without overwriting a remaining tab.
+            self.design = tab.design.clone();
+            self.undo = tab.undo.clone();
+            self.redo = tab.redo.clone();
+            self.path = cx.new(|cx| TextInput::new(&tab.path, cx));
+            self.saved_path = tab.saved_path.clone();
+            self.mode = tab.mode;
+            self.camera = tab.camera;
+            self.scale = tab.scale;
+            self.center = tab.center;
+            self.sketch = self.mode == Mode::Sketch;
+            self.panel = None;
+            self.menu = None;
+            self.restore_edit(cx);
+        }
         fn new_document(&mut self, cx: &mut Context<Self>) {
-            self.checkpoint();
+            self.stash_document(cx);
+            self.documents
+                .push(self.documents[self.active_document].clone());
+            self.active_document = self.documents.len() - 1;
+            self.undo.clear();
+            self.redo.clear();
             self.design = Design::default();
             self.inputs.clear();
             self.solved.clear();
@@ -446,6 +553,15 @@ mod implementation {
             }
             match crate::persistence::container::load(&path) {
                 Ok(d) => {
+                    let opened_path = self.path.read(cx).content.to_string();
+                    let previous_path = self
+                        .saved_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| self.documents[self.active_document].path.clone());
+                    self.path = cx.new(|cx| TextInput::new(&previous_path, cx));
+                    self.new_document(cx);
+                    self.path = cx.new(|cx| TextInput::new(&opened_path, cx));
                     self.undo.clear();
                     self.redo.clear();
                     self.design = d;
@@ -527,15 +643,45 @@ mod implementation {
                         self.rebuild(cx);
                     }
                 }
-                Action::Line | Action::Rectangle => {
+                Action::Line
+                | Action::Rectangle
+                | Action::Circle
+                | Action::Circle2
+                | Action::Circle3
+                | Action::Arc3
+                | Action::Ellipse
+                | Action::Polygon
+                | Action::Slot
+                | Action::Spline
+                | Action::CenterRectangle
+                | Action::CenterArc
+                | Action::Point
+                | Action::Trim
+                | Action::Extend
+                | Action::Break => {
                     if self.mode != Mode::Sketch {
                         self.set_mode(Mode::Sketch, cx);
                     }
-                    self.tool = if action == Action::Line {
-                        Tool::Line
-                    } else {
-                        Tool::Rectangle
+                    self.tool = match action {
+                        Action::Line => Tool::Line,
+                        Action::Rectangle => Tool::Rectangle,
+                        Action::Circle => Tool::Circle,
+                        Action::Circle2 => Tool::Circle2,
+                        Action::Circle3 => Tool::Circle3,
+                        Action::Arc3 => Tool::Arc3,
+                        Action::Ellipse => Tool::Ellipse,
+                        Action::Polygon => Tool::Polygon,
+                        Action::Slot => Tool::Slot,
+                        Action::Spline => Tool::Spline,
+                        Action::CenterRectangle => Tool::CenterRectangle,
+                        Action::CenterArc => Tool::Arc,
+                        Action::Point => Tool::Point,
+                        Action::Trim => Tool::Trim,
+                        Action::Extend => Tool::Extend,
+                        _ => Tool::Break,
                     };
+                    self.arc_start = None;
+                    self.tool_points.clear();
                     self.anchor = None;
                 }
                 Action::Select => {
@@ -546,9 +692,51 @@ mod implementation {
                 Action::Extrude => self.panel = Some(Panel::Extrude),
                 Action::Dimension => {
                     self.panel = Some(Panel::Dimension);
-                    self.tool = Tool::Select;
+                    self.tool = Tool::Dimension;
+                    self.dimension_edit = None;
                     self.anchor = None;
                 }
+                Action::Measure => {
+                    self.tool = Tool::Measure;
+                    self.selection.clear();
+                    self.panel = Some(Panel::Measure)
+                }
+                Action::Offset => self.panel = Some(Panel::Offset),
+                Action::Move
+                | Action::Mirror
+                | Action::Scale
+                | Action::RectangularPattern
+                | Action::CircularPattern => {
+                    self.transform_action = action;
+                    self.panel = Some(Panel::Transform);
+                    self.tool = Tool::Select;
+                }
+                Action::Fillet => self.panel = Some(Panel::Fillet),
+                Action::Construction => {
+                    let mut d = self.display_design();
+                    crate::sketch::edit::toggle_construction(&mut d, &self.selection);
+                    self.commit_sketch(d, cx);
+                }
+                Action::Delete => {
+                    let mut d = self.display_design();
+                    d.constraints.retain(|c| !self.selection.contains(&c.id));
+                    d.driven_dimensions
+                        .retain(|c| !self.selection.contains(&c.id));
+                    crate::sketch::edit::delete(&mut d, &self.selection);
+                    if self.commit_sketch(d, cx) {
+                        self.selection.clear();
+                        self.line = None;
+                    }
+                }
+                Action::Coincident
+                | Action::Parallel
+                | Action::Perpendicular
+                | Action::Equal
+                | Action::Collinear
+                | Action::Concentric
+                | Action::Tangent
+                | Action::Midpoint
+                | Action::Symmetry => self.constrain_selection(action, cx),
                 Action::Horizontal => self.apply_constraint(0, cx),
                 Action::Vertical => self.apply_constraint(1, cx),
                 Action::Fixed => self.apply_constraint(2, cx),
@@ -642,65 +830,100 @@ mod implementation {
             self.rebuild(cx);
         }
         fn keyboard(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-            if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
-                match event.keystroke.key.as_str() {
-                    "s" => {
-                        if self.saved_path.is_some() {
-                            self.save(cx);
-                        } else {
-                            self.file_open = false;
-                            self.panel = Some(Panel::Document);
-                        }
-                    }
-                    "o" => {
-                        self.file_open = true;
-                        self.panel = Some(Panel::Document);
-                    }
-                    "n" => self.new_document(cx),
-                    "z" if self.focus.is_focused(window) => {
-                        if event.keystroke.modifiers.shift {
-                            self.redo_edit(cx);
-                        } else {
-                            self.undo_edit(cx);
-                        }
-                    }
-                    "y" if self.focus.is_focused(window) => self.redo_edit(cx),
-                    _ => return,
-                }
+            if event.keystroke.key == "enter"
+                && self.panel == Some(Panel::Dimension)
+                && self.dimension.read(cx).focus_handle(cx).is_focused(window)
+            {
+                self.apply_dimension(cx);
+                window.focus(&self.focus);
                 cx.stop_propagation();
+                return;
+            }
+            if event.keystroke.key == "enter"
+                && self.tool == Tool::Spline
+                && self.focus.is_focused(window)
+            {
+                let mut d = self.display_design();
+                match crate::sketch::edit::spline(&mut d, &self.tool_points, true) {
+                    Ok(_) => {
+                        if self.commit_sketch(d, cx) {
+                            self.tool_points.clear();
+                        }
+                    }
+                    Err(e) => self.error = Some(e),
+                }
                 cx.notify();
                 return;
             }
-            if !self.focus.is_focused(window) {
-                if event.keystroke.key == "escape" {
-                    window.focus(&self.focus);
-                } else {
-                    return;
-                }
+            let focused = self.focus.is_focused(window);
+            if event.keystroke.key == "escape" && !focused {
+                window.focus(&self.focus);
+                return;
             }
-            match event.keystroke.key.as_str() {
-                "escape" => {
+            let modifiers = event.keystroke.modifiers;
+            let mut chord = String::new();
+            if modifiers.control || modifiers.platform {
+                chord.push_str("ctrl-")
+            }
+            if modifiers.alt {
+                chord.push_str("alt-")
+            }
+            if modifiers.shift {
+                chord.push_str("shift-")
+            }
+            chord.push_str(&event.keystroke.key.to_lowercase());
+            let command = self
+                .keymap
+                .resolve(&chord, self.sketch, !focused)
+                .map(str::to_owned);
+            let Some(command) = command else { return };
+            match command.as_str() {
+                "undo" => self.undo_edit(cx),
+                "redo" => self.redo_edit(cx),
+                "new" => self.new_document(cx),
+                "save" => {
+                    if self.saved_path.is_some() {
+                        self.save(cx)
+                    } else {
+                        self.file_open = false;
+                        self.panel = Some(Panel::Document)
+                    }
+                }
+                "open" => {
+                    self.file_open = true;
+                    self.panel = Some(Panel::Document)
+                }
+                "cancel" => {
+                    self.finish_sketch_drag(true, cx);
                     self.anchor = None;
+                    self.arc_start = None;
+                    self.tool_points.clear();
                     self.tool = Tool::Select;
+                    self.selection.clear();
                     self.line = None;
-                    self.selected = 0;
                     self.menu = None;
                     self.panel = None;
-                    self.changed_camera();
+                    self.dimension_edit = None;
                 }
-                "f" => self.fit(),
-                "l" | "r" => {
-                    self.set_mode(Mode::Sketch, cx);
-                    self.tool = if event.keystroke.key == "l" {
-                        Tool::Line
-                    } else {
-                        Tool::Rectangle
-                    };
+                "select-all" => {
+                    let d = self.display_design();
+                    self.selection = crate::sketch::entities::curve_ids(&d);
+                    self.line = d.lines.first().map(|l| l.id);
                 }
-                "d" if self.sketch => self.panel = Some(Panel::Dimension),
-                "e" => self.panel = Some(Panel::Extrude),
-                _ => return,
+                "command-search" => self.panel = Some(Panel::Search),
+                id => {
+                    let feature = [Mode::Sketch, Mode::Solid]
+                        .into_iter()
+                        .flat_map(toolbar::groups)
+                        .flat_map(|g| g.features)
+                        .find(|f| f.id == id)
+                        .copied();
+                    if let Some(feature) = feature {
+                        self.feature(feature, window, cx)
+                    }
+                }
             }
+            cx.stop_propagation();
             cx.notify();
         }
     }
@@ -708,7 +931,7 @@ mod implementation {
     impl WorkspaceView {
         fn top_bar(&self, cx: &mut Context<Self>) -> Div {
             let mut row = div()
-                .h(px(42.))
+                .h(px(50.))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -776,49 +999,64 @@ mod implementation {
                         .on_click(cx.listener(|this, _, _, cx| this.redo_edit(cx))),
                 )
                 .child(separator());
-            for mode in [Mode::Solid, Mode::Sketch, Mode::Drawing] {
-                row = row.child(
+            let mut tabs = div()
+                .id("document-tabs")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .overflow_x_scroll();
+            for (index, tab) in self.documents.iter().enumerate() {
+                let name = if index == self.active_document {
+                    self.document_name(cx)
+                } else {
+                    PathBuf::from(&tab.path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Untitled")
+                        .to_owned()
+                };
+                tabs = tabs.child(
                     div()
-                        .id(SharedString::from(format!("mode-{}", mode.label())))
+                        .id(("document-tab", index))
+                        .flex_none()
                         .h_full()
-                        .px_4()
+                        .px_3()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .cursor_pointer()
-                        .bg(rgb(if self.mode == mode {
+                        .bg(rgb(if index == self.active_document {
                             t::VIEWPORT
                         } else {
                             t::PANEL
                         }))
-                        .text_color(rgb(if self.mode == mode { t::TEXT } else { t::MUTED }))
-                        .hover(|s| s.bg(rgb(t::HOVER)))
-                        .child(icon(
-                            match mode {
-                                Mode::Solid => "create_block",
-                                Mode::Sketch => "line_rectangle",
-                                Mode::Drawing => "drawing_settings",
-                            },
-                            16.,
-                            if self.mode == mode {
-                                t::ACCENT
-                            } else {
-                                t::MUTED
-                            },
-                        ))
-                        .child(mode.label())
+                        .cursor_pointer()
+                        .child(name)
+                        .child(
+                            button(
+                                ("close-document", index),
+                                "close",
+                                "Close design",
+                                false,
+                                true,
+                            )
+                            .size(px(26.))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.close_document(index, cx);
+                                },
+                            )),
+                        )
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.set_mode(mode, cx);
+                            this.switch_document(index, cx);
                             window.focus(&this.focus);
                         })),
-                )
+                );
             }
-            row.child(div().flex_1()).child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(t::MUTED))
-                    .px_3()
-                    .child(self.document_name(cx)),
+            row.child(tabs).child(
+                button("add-document", "add", "New design", false, true)
+                    .on_click(cx.listener(|this, _, _, cx| this.new_document(cx))),
             )
         }
         fn document_name(&self, cx: &App) -> String {
@@ -832,7 +1070,7 @@ mod implementation {
         fn ribbon(&self, cx: &mut Context<Self>) -> Stateful<Div> {
             let mut row = div()
                 .id("ribbon")
-                .h(px(66.))
+                .h(px(86.))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -842,12 +1080,33 @@ mod implementation {
                 .border_b_1()
                 .border_color(rgb(t::BORDER))
                 .overflow_x_scroll();
+            row = row.child(
+                div()
+                    .id("workspace-selector")
+                    .h(px(64.))
+                    .w(px(110.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .bg(rgb(t::PANEL))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .child(self.mode.label())
+                    .child(icon("down", 16., t::TEXT))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_x = 12.;
+                        this.menu = Some("Workspace");
+                        cx.notify();
+                    })),
+            );
             for group in toolbar::groups(self.mode) {
                 let name = group.name;
                 let mut column = div().flex_none().flex().flex_col().gap_1();
                 let mut tools = div().flex().gap_1();
                 // Three discoverable primary icons per group; every remaining tool is in its menu.
-                for &feature in group.features.iter().take(3) {
+                for &feature in group.features.iter().filter(|f| self.pinned.contains(f.id)) {
                     let active = feature.action.is_some_and(|a| {
                         matches!(
                             (a, self.tool),
@@ -871,7 +1130,7 @@ mod implementation {
                 column = column.child(tools).child(
                     div()
                         .id(SharedString::from(format!("group-{name}")))
-                        .h(px(15.))
+                        .h(px(23.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -879,7 +1138,8 @@ mod implementation {
                         .cursor_pointer()
                         .rounded_sm()
                         .hover(|s| s.bg(rgb(t::HOVER)))
-                        .child(icon("down", 11., t::MUTED))
+                        .child(name)
+                        .child(icon("down", 12., t::MUTED))
                         .tooltip(move |_, cx| cx.new(|_| GroupTip(name)).into())
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.menu_x = (f64::from(event.position().x) as f32 - 48.).clamp(
@@ -902,12 +1162,29 @@ mod implementation {
         }
         fn browser(&self, cx: &mut Context<Self>) -> Div {
             let mut tree = div()
-                .w(px(230.))
+                .w(px(260.))
                 .flex_none()
                 .flex()
                 .flex_col()
                 .bg(rgb(t::PANEL))
-                .border_r_1()
+                .border_1()
+                .border_color(rgb(t::BORDER))
+                .rounded_md()
+                .occlude()
+                .absolute()
+                .top(px(16.))
+                .left(px(16.))
+                .max_h(px(self.bounds.get().map_or(500., |b| {
+                    (f64::from(b.size.height) as f32 - 32.).max(120.)
+                })))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                )
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                )
                 .border_color(rgb(t::BORDER));
             tree = tree.child(
                 div()
@@ -939,7 +1216,7 @@ mod implementation {
                 let expanded = self.expanded.contains(key);
                 let hidden = self.hidden.contains(key);
                 let mut category = div()
-                    .h(px(30.))
+                    .h(px(36.))
                     .flex()
                     .items_center()
                     .px_2()
@@ -956,7 +1233,7 @@ mod implementation {
                             false,
                             true,
                         )
-                        .size(px(20.))
+                        .size(px(28.))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.expanded.remove(key) {
                                 this.expanded.insert(key);
@@ -974,7 +1251,7 @@ mod implementation {
                             false,
                             true,
                         )
-                        .size(px(22.))
+                        .size(px(30.))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.hidden.remove(key) {
                                 this.hidden.insert(key);
@@ -1098,6 +1375,17 @@ mod implementation {
                 Panel::Extrude => "Extrude",
                 Panel::Dimension => "Dimension",
                 Panel::View => "View",
+                Panel::Measure => "Measure",
+                Panel::Offset => "Offset",
+                Panel::Search => "Sketch toolbox",
+                Panel::Transform => match self.transform_action {
+                    Action::Scale => "Scale",
+                    Action::Mirror => "Mirror",
+                    Action::RectangularPattern => "Rectangular pattern",
+                    Action::CircularPattern => "Circular pattern",
+                    _ => "Move / copy",
+                },
+                Panel::Fillet => "Sketch fillet",
             };
             body = body.child(
                 div()
@@ -1179,10 +1467,9 @@ mod implementation {
                                         )
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
-                                                this.checkpoint();
+                                                let mut candidate = this.display_design();
                                                 let expression = input.read(cx).content.to_string();
-                                                if let Some(p) = this
-                                                    .design
+                                                if let Some(p) = candidate
                                                     .parameters
                                                     .iter_mut()
                                                     .find(|p| p.id == id)
@@ -1198,7 +1485,7 @@ mod implementation {
                                                     this.depth = cx
                                                         .new(|cx| TextInput::new(&expression, cx));
                                                 }
-                                                this.rebuild(cx);
+                                                this.commit_sketch(candidate, cx);
                                                 window.focus(&this.focus);
                                             }),
                                         ),
@@ -1229,18 +1516,225 @@ mod implementation {
                                 .child("New body · XY profile"),
                         );
                 }
+                Panel::Transform => {
+                    let action = self.transform_action;
+                    if matches!(action, Action::Move | Action::RectangularPattern) {
+                        content = content
+                            .child(if action == Action::Move {
+                                "X distance"
+                            } else {
+                                "X spacing"
+                            })
+                            .child(self.transform_x.clone())
+                            .child(if action == Action::Move {
+                                "Y distance"
+                            } else {
+                                "Y spacing"
+                            })
+                            .child(self.transform_y.clone());
+                    }
+                    if matches!(action, Action::Move | Action::CircularPattern) {
+                        content = content
+                            .child(if action == Action::Move {
+                                "Rotation about sketch origin"
+                            } else {
+                                "Sweep angle (0 = full circle)"
+                            })
+                            .child(self.transform_angle.clone());
+                    }
+                    if matches!(
+                        action,
+                        Action::Scale | Action::RectangularPattern | Action::CircularPattern
+                    ) {
+                        content = content
+                            .child(if action == Action::Scale {
+                                "Scale factor"
+                            } else if action == Action::RectangularPattern {
+                                "X quantity"
+                            } else {
+                                "Quantity"
+                            })
+                            .child(self.transform_count.clone());
+                    }
+                    if action == Action::RectangularPattern {
+                        content = content
+                            .child("Y quantity")
+                            .child(self.transform_rows.clone());
+                    }
+                    if action == Action::Mirror {
+                        content = content.child("Select objects, then Shift-click the mirror line");
+                    }
+                    if matches!(action, Action::Scale | Action::CircularPattern) {
+                        content = content.child(
+                            "Shift-click a point last to set the center. Default: sketch origin.",
+                        );
+                    }
+                    if matches!(action, Action::Move | Action::Scale) {
+                        content = content.child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    button(
+                                        "copy-sketch",
+                                        "copy",
+                                        "Create a copy",
+                                        self.transform_copy,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.transform_copy = !this.transform_copy;
+                                            cx.notify()
+                                        },
+                                    )),
+                                )
+                                .child("Create copy"),
+                        );
+                    }
+                    content = content.child(
+                        button("apply-transform", "move_copy", "Apply", false, true).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.apply_transform(cx);
+                                window.focus(&this.focus)
+                            }),
+                        ),
+                    );
+                }
+                Panel::Fillet => {
+                    content = content
+                        .child("Select two connected straight lines")
+                        .child("Radius")
+                        .child(self.dimension.clone())
+                        .child(
+                            button("apply-fillet", "fillet", "Apply fillet", false, true).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    let mut d = this.display_design();
+                                    let mut parameters = Design::default();
+                                    let id = parameters.parameter(
+                                        "radius",
+                                        this.dimension.read(cx).content.to_string(),
+                                    );
+                                    let result =
+                                        crate::parameters::expression::evaluate(&parameters)
+                                            .and_then(|p| {
+                                                crate::sketch::edit::fillet(
+                                                    &mut d,
+                                                    &this.selection,
+                                                    p[&id],
+                                                )
+                                            });
+                                    match result {
+                                        Ok(()) => {
+                                            this.commit_sketch(d, cx);
+                                        }
+                                        Err(e) => this.error = Some(e),
+                                    }
+                                    window.focus(&this.focus);
+                                    cx.notify();
+                                }),
+                            ),
+                        );
+                }
+                Panel::Search => {
+                    content = content.child(self.search.clone());
+                    let query = self.search.read(cx).content.to_lowercase();
+                    for group in toolbar::groups(self.mode) {
+                        for feature in group
+                            .features
+                            .iter()
+                            .filter(|f| f.available() && f.name.to_lowercase().contains(&query))
+                        {
+                            let feature = *feature;
+                            content = content.child(
+                                div()
+                                    .id(feature.id)
+                                    .py_2()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(t::HOVER)))
+                                    .child(feature.name)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.panel = None;
+                                        this.feature(feature, window, cx)
+                                    })),
+                            );
+                        }
+                    }
+                }
+                Panel::Measure => {
+                    content = content
+                        .child(crate::sketch::dimensions::measure(
+                            &self.display_design(),
+                            &self.selection,
+                        ))
+                        .child(
+                            div()
+                                .text_color(rgb(t::MUTED))
+                                .child("Shift-click to measure between two selections"),
+                        );
+                }
+                Panel::Offset => {
+                    content = content
+                        .child("Offset distance")
+                        .child(self.dimension.clone())
+                        .child(
+                            button("apply-offset", "offset", "Apply offset", false, true).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    let mut d = this.display_design();
+                                    let mut parameter = Design::default();
+                                    let id = parameter.parameter(
+                                        "offset",
+                                        this.dimension.read(cx).content.to_string(),
+                                    );
+                                    match crate::parameters::expression::evaluate(&parameter)
+                                        .and_then(|p| {
+                                            crate::sketch::edit::offset(
+                                                &mut d,
+                                                &this.selection,
+                                                p[&id],
+                                            )
+                                        }) {
+                                        Ok(()) => {
+                                            this.commit_sketch(d, cx);
+                                        }
+                                        Err(e) => this.error = Some(e),
+                                    }
+                                    window.focus(&this.focus);
+                                    cx.notify();
+                                }),
+                            ),
+                        );
+                }
                 Panel::Dimension => {
                     content = content
                         .child(
                             div()
                                 .text_color(rgb(t::MUTED))
-                                .child(if self.line.is_some() {
-                                    "Length"
-                                } else {
-                                    "Select a sketch line"
-                                }),
+                                .child("Select geometry, enter a value, then apply"),
                         )
                         .child(self.dimension.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    button(
+                                        "reference-dimension",
+                                        "measure",
+                                        "Driven dimension (reference only)",
+                                        self.reference_dimension,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.reference_dimension = !this.reference_dimension;
+                                            cx.notify()
+                                        },
+                                    )),
+                                )
+                                .child("Driven (reference)"),
+                        )
                         .child(
                             div().flex().justify_end().child(
                                 button(
@@ -1263,6 +1757,18 @@ mod implementation {
                     for (id, image, label, enabled) in [
                         ("view-grid", "grid", "Grid", self.grid),
                         ("view-snap", "snap_grid", "Snap to grid", self.snap),
+                        (
+                            "view-constraints",
+                            "properties",
+                            "Constraints",
+                            self.show_constraints,
+                        ),
+                        (
+                            "view-dimensions",
+                            "dim_linear",
+                            "Dimensions",
+                            self.show_dimensions,
+                        ),
                     ] {
                         content = content.child(
                             div()
@@ -1273,8 +1779,12 @@ mod implementation {
                                     cx.listener(move |this, _, _, cx| {
                                         if id == "view-grid" {
                                             this.grid = !this.grid;
-                                        } else {
+                                        } else if id == "view-snap" {
                                             this.snap = !this.snap;
+                                        } else if id == "view-constraints" {
+                                            this.show_constraints = !this.show_constraints;
+                                        } else {
+                                            this.show_dimensions = !this.show_dimensions;
                                         }
                                         cx.notify();
                                     }),
@@ -1320,27 +1830,12 @@ mod implementation {
                     .map(|l| l.ends)
                     .unwrap_or_default();
                 for c in &self.design.constraints {
-                    let label = match &c.kind {
-                        ConstraintKind::Horizontal { line: id } if *id == line => {
-                            Some("Horizontal")
-                        }
-                        ConstraintKind::Vertical { line: id } if *id == line => Some("Vertical"),
-                        ConstraintKind::Length { line: id, .. } if *id == line => Some("Length"),
-                        ConstraintKind::Fixed { point, .. } if ends.contains(point) => {
-                            Some("Fixed point")
-                        }
-                        ConstraintKind::DistanceX { points, .. }
-                            if points.iter().any(|p| ends.contains(p)) =>
-                        {
-                            Some("Width")
-                        }
-                        ConstraintKind::DistanceY { points, .. }
-                            if points.iter().any(|p| ends.contains(p)) =>
-                        {
-                            Some("Height")
-                        }
-                        _ => None,
-                    };
+                    let label = c
+                        .kind
+                        .references()
+                        .iter()
+                        .any(|id| *id == line || ends.contains(id) || self.selection.contains(id))
+                        .then_some(c.kind.label());
                     if let Some(label) = label {
                         let id = c.id;
                         content = content.child(
@@ -1543,141 +2038,141 @@ mod implementation {
                     ),
             )
         }
-        fn timeline(&self, cx: &mut Context<Self>) -> Div {
+        fn timeline_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
+            let Some(bounds) = self.timeline_bounds.get() else {
+                return;
+            };
+            let index = ((f64::from(x - bounds.origin.x) - 16.) / 48.)
+                .round()
+                .max(0.) as usize;
+            let index = index.min(self.design.construction.len());
+            let id = if index == 0 {
+                None
+            } else {
+                self.design.construction.get(index - 1).map(|f| f.id)
+            };
+            self.construction_step(id, false, cx);
+            if index == 0 {
+                self.before_construction = true;
+                self.rebuild(cx);
+            }
+        }
+        fn timeline(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+            let capture = self.timeline_bounds.clone();
+            let marker = if self.before_construction {
+                0
+            } else {
+                self.construction_cursor
+                    .and_then(|id| self.design.construction.iter().position(|f| f.id == id))
+                    .map_or(self.design.construction.len(), |i| i + 1)
+            };
             let mut row = div()
-                .h(px(48.))
+                .id("construction-timeline")
+                .relative()
+                .h(px(58.))
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap_1()
-                .px_2()
+                .gap_2()
+                .px(px(24.))
                 .bg(rgb(t::PANEL))
                 .border_t_1()
-                .border_color(rgb(t::BORDER));
-            row = row
-                .child(
-                    button(
-                        "timeline-start",
-                        "upmost",
-                        "Before all construction",
-                        false,
-                        true,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.construction_step(None, false, cx);
-                        this.before_construction = true;
-                        this.rebuild(cx);
-                    })),
-                )
-                .child(
-                    button(
-                        "timeline-previous",
-                        "up",
-                        "Previous construction feature",
-                        false,
-                        true,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let index = this
-                            .construction_cursor
-                            .and_then(|id| this.design.construction.iter().position(|f| f.id == id))
-                            .unwrap_or(this.design.construction.len().saturating_sub(1));
-                        if index == 0 {
-                            this.construction_step(None, false, cx);
-                            this.before_construction = true;
-                            this.rebuild(cx);
-                        } else {
-                            let id = this.design.construction.get(index - 1).map(|f| f.id);
-                            this.construction_step(id, false, cx);
-                        }
-                    })),
-                )
-                .child(separator());
-            let mut strip = div()
-                .id("construction-timeline")
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .gap_2()
+                .border_color(rgb(t::BORDER))
                 .overflow_x_scroll();
-            let cursor = self
-                .construction_cursor
-                .and_then(|id| self.design.construction.iter().position(|f| f.id == id));
-            for (index, f) in self.design.construction.iter().enumerate() {
-                let id = f.id;
-                let active = self.construction_cursor == Some(id);
-                let icon_name = match f.kind {
-                    ConstructionKind::Sketch => "line_rectangle",
-                    ConstructionKind::Extrude { .. } => "up",
-                };
-                strip = strip
-                    .child(
-                        button(
-                            SharedString::from(format!("feature-{id}")),
-                            icon_name,
-                            &format!("{} · Edit feature", f.name),
-                            active,
-                            true,
-                        )
-                        .opacity(
-                            if self.before_construction || cursor.is_some_and(|i| index > i) {
-                                0.35
-                            } else {
-                                1.
-                            },
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.construction_step(Some(id), true, cx);
-                                window.focus(&this.focus);
-                            },
-                        )),
-                    )
-                    .when(active, |s| {
-                        s.child(div().w(px(2.)).h(px(28.)).bg(rgb(t::ACCENT)).flex_none())
-                    });
-            }
-            row.child(strip)
-                .child(separator())
-                .child(
+            for (index, feature) in self.design.construction.iter().enumerate() {
+                let id = feature.id;
+                row = row.child(
                     button(
-                        "timeline-next",
-                        "down",
-                        "Next construction feature",
-                        false,
+                        SharedString::from(format!("feature-{id}")),
+                        match feature.kind {
+                            ConstructionKind::Sketch => "line_rectangle",
+                            ConstructionKind::Extrude { .. } => "up",
+                        },
+                        &format!("{} · Edit feature", feature.name),
+                        self.construction_cursor == Some(id),
                         true,
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let next = if this.before_construction {
-                            this.design.construction.first().map(|f| f.id)
-                        } else {
-                            this.construction_cursor
-                                .and_then(|id| {
-                                    this.design.construction.iter().position(|f| f.id == id)
-                                })
-                                .and_then(|index| this.design.construction.get(index + 1))
-                                .map(|f| f.id)
-                        };
-                        this.construction_step(next, false, cx);
+                    .opacity(if index >= marker { 0.35 } else { 1. })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.construction_step(Some(id), true, cx);
+                        window.focus(&this.focus);
                     })),
+                );
+            }
+            row.child(
+                canvas(
+                    move |bounds, _, _| capture.set(Some(bounds)),
+                    |_, _, _, _| {},
                 )
-                .child(
-                    button(
-                        "timeline-end",
-                        "downmost",
-                        "Restore all construction features",
-                        false,
-                        true,
-                    )
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.construction_step(None, false, cx)),
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                div()
+                    .id("construction-marker")
+                    .absolute()
+                    .left(px(16. + marker as f32 * 48.))
+                    .top(px(6.))
+                    .w(px(8.))
+                    .h(px(46.))
+                    .bg(rgb(t::ACCENT))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.timeline_drag = true;
+                            cx.stop_propagation();
+                        }),
                     ),
-                )
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.timeline_drag && event.pressed_button == Some(MouseButton::Left) {
+                    this.timeline_at(event.position.x, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.timeline_drag = false),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.timeline_drag = false),
+            )
         }
         fn menu_overlay(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
             let name = self.menu?;
+            if name == "Workspace" {
+                let mut menu = div()
+                    .id("workspace-menu")
+                    .absolute()
+                    .top(px(136.))
+                    .left(px(12.))
+                    .w(px(190.))
+                    .bg(rgb(t::PANEL))
+                    .border_1()
+                    .border_color(rgb(t::BORDER))
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    }));
+                for mode in [Mode::Solid, Mode::Sketch, Mode::Drawing] {
+                    menu = menu.child(
+                        div()
+                            .id(SharedString::from(format!("workspace-{}", mode.label())))
+                            .h(px(42.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(t::HOVER)))
+                            .child(mode.label())
+                            .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx))),
+                    );
+                }
+                return Some(menu);
+            }
             let features: Vec<Feature> = if name == "Orient" {
                 [
                     ("Front", Action::ViewFront),
@@ -1720,9 +2215,9 @@ mod implementation {
             let mut menu = div()
                 .id("tool-menu")
                 .absolute()
-                .top(px(104.))
+                .top(px(136.))
                 .left(px(self.menu_x))
-                .w(px(328.))
+                .w(px(390.))
                 .max_h(px(self.bounds.get().map_or(440., |b| {
                     f64::from(b.size.height).clamp(120., 440.) as f32
                 })))
@@ -1748,7 +2243,7 @@ mod implementation {
                 list = list.child(
                     div()
                         .id(feature.id)
-                        .h(px(31.))
+                        .h(px(40.))
                         .px_3()
                         .flex()
                         .items_center()
@@ -1773,6 +2268,38 @@ mod implementation {
                                     .child("Not implemented"),
                             )
                         })
+                        .child(
+                            button(
+                                SharedString::from(format!("pin-{}", feature.id)),
+                                if self.pinned.contains(feature.id) {
+                                    "locked"
+                                } else {
+                                    "unlocked"
+                                },
+                                if self.pinned.contains(feature.id) {
+                                    "Unpin from toolbar"
+                                } else {
+                                    "Pin to toolbar"
+                                },
+                                self.pinned.contains(feature.id),
+                                true,
+                            )
+                            .size(px(32.))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if !this.pinned.remove(feature.id) {
+                                        this.pinned.insert(feature.id);
+                                    }
+                                    if let Err(error) =
+                                        crate::settings::store::save_toolbar_pins(&this.pinned)
+                                    {
+                                        this.error = Some(error);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.feature(feature, window, cx)
                         })),
@@ -1786,45 +2313,199 @@ mod implementation {
             } else {
                 self.design.points.iter().map(|p| p.xy).collect()
             };
-            let lines = self
-                .design
-                .lines
-                .iter()
-                .map(|l| {
+            let d = self.display_design();
+            let color = |id: Uuid| {
+                let ids = crate::sketch::entities::curve_points(&d, id);
+                let conflict = d.constraints.iter().any(|c| {
+                    self.conflicts.contains(&c.id)
+                        && c.kind
+                            .references()
+                            .iter()
+                            .any(|r| *r == id || ids.contains(r))
+                });
+                let fixed = ids.iter().all(|p| {
+                    d.constraints
+                        .iter()
+                        .any(|c| matches!(c.kind,ConstraintKind::Fixed{point,..} if point==*p))
+                });
+                let fully = ids.iter().all(|id| {
+                    d.points
+                        .iter()
+                        .position(|p| p.id == *id)
+                        .is_some_and(|i| self.point_dof.get(i) == Some(&0))
+                });
+                if conflict {
+                    t::ERROR
+                } else if fixed {
+                    t::SUCCESS
+                } else if fully {
+                    t::TEXT
+                } else {
+                    t::ACCENT
+                }
+            };
+            let lines = crate::sketch::entities::curve_ids(&d)
+                .into_iter()
+                .map(|id| {
                     (
-                        l.id,
-                        l.ends.map(|id| {
-                            coords[self.design.points.iter().position(|p| p.id == id).unwrap()]
-                        }),
+                        id,
+                        crate::sketch::entities::samples(&d, id),
+                        color(id),
+                        d.construction_geometry.contains(&id),
                     )
                 })
                 .collect();
-            let mut annotations = Vec::new();
-            for c in &self.design.constraints {
-                let pair = match &c.kind {
-                    ConstraintKind::DistanceX { points, parameter }
-                    | ConstraintKind::DistanceY { points, parameter } => {
-                        Some((*points, *parameter))
+            let point_colors = d
+                .points
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    if self.selection.contains(&p.id) {
+                        t::WARNING
+                    } else if d.constraints.iter().any(
+                        |c| matches!(c.kind, ConstraintKind::Fixed { point, .. } if point == p.id),
+                    ) {
+                        t::SUCCESS
+                    } else if self.point_dof.get(i) == Some(&0) {
+                        t::TEXT
+                    } else {
+                        t::ACCENT
                     }
-                    ConstraintKind::Length { line, parameter } => self
-                        .design
-                        .lines
-                        .iter()
-                        .find(|l| l.id == *line)
-                        .map(|l| (l.ends, *parameter)),
-                    _ => None,
-                };
-                if let Some((points, id)) = pair {
-                    let [a, b] = points.map(|id| {
-                        coords[self.design.points.iter().position(|p| p.id == id).unwrap()]
-                    });
-                    if let Some(p) = self.design.parameters.iter().find(|p| p.id == id) {
-                        annotations.push((
-                            [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5],
-                            format!("{} = {}", p.name, p.expression),
-                        ));
+                })
+                .collect();
+            let mut annotations = Vec::new();
+            let mut dimensions = Vec::new();
+            for c in d.constraints.iter().chain(&d.driven_dimensions) {
+                let at = self.dimension_anchor(&d, c);
+                if c.kind.parameter().is_some() {
+                    let measured = crate::sketch::dimensions::value(&d, &c.kind).unwrap_or(0.);
+                    let angular = matches!(c.kind, ConstraintKind::Angle { .. });
+                    let driven = d.driven_dimensions.iter().any(|v| v.id == c.id);
+                    let prefix = match c.kind {
+                        ConstraintKind::Diameter { .. } => "Ø",
+                        ConstraintKind::Radius { .. } => "R",
+                        _ => "",
+                    };
+                    let text = if angular {
+                        format!("{:.2}°", measured.to_degrees())
+                    } else {
+                        format!("{prefix}{:.3}", measured * 1000.)
+                    };
+                    annotations.push((at, if driven { format!("({text})") } else { text }));
+                    let ends = match c.kind {
+                        ConstraintKind::Length { line, .. } => {
+                            d.lines.iter().find(|l| l.id == line).map(|l| l.ends)
+                        }
+                        ConstraintKind::Distance { points, .. }
+                        | ConstraintKind::DistanceX { points, .. }
+                        | ConstraintKind::DistanceY { points, .. }
+                        | ConstraintKind::ProjectedDistance { points, .. } => Some(points),
+                        ConstraintKind::Diameter { circle, .. }
+                        | ConstraintKind::Radius { circle, .. } => d
+                            .circles
+                            .iter()
+                            .find(|c| c.id == circle)
+                            .map(|c| [c.center, c.rim]),
+                        _ => None,
+                    };
+                    if let Some(ends) = ends {
+                        let direction = match c.kind {
+                            ConstraintKind::DistanceX { .. } => Some([1., 0.]),
+                            ConstraintKind::DistanceY { .. } => Some([0., 1.]),
+                            ConstraintKind::ProjectedDistance { direction, .. } => Some(direction),
+                            _ => None,
+                        };
+                        dimensions.push((
+                            ends.map(|id| crate::sketch::entities::point(&d, id)),
+                            at,
+                            direction,
+                        ))
                     }
                 }
+            }
+            if !self.show_dimensions {
+                annotations.clear();
+                dimensions.clear();
+            }
+            let mut constraint_markers = Vec::new();
+            if self.sketch
+                && self.show_constraints
+                && let Some(bounds) = self.bounds.get()
+            {
+                let mut placed: Vec<[f64; 2]> = Vec::new();
+                for c in &d.constraints {
+                    if c.kind.parameter().is_some() {
+                        continue;
+                    }
+                    let Some(first) = c.kind.references().first().copied() else {
+                        continue;
+                    };
+                    let at = crate::sketch::entities::position(&d, first);
+                    let offset = placed
+                        .iter()
+                        .filter(|p| (p[0] - at[0]).hypot(p[1] - at[1]) * self.scale < 20.)
+                        .count() as f32;
+                    placed.push(at);
+                    let id = c.id;
+                    let label = c.kind.label();
+                    let x =
+                        f64::from(bounds.size.width) * 0.5 + (at[0] - self.center[0]) * self.scale;
+                    let y =
+                        f64::from(bounds.size.height) * 0.5 - (at[1] - self.center[1]) * self.scale;
+                    constraint_markers.push(
+                        button(
+                            SharedString::from(format!("constraint-{id}")),
+                            c.kind.icon(),
+                            label,
+                            self.selection.contains(&id),
+                            true,
+                        )
+                        .absolute()
+                        .left(px(x as f32 + 7. + offset * 24.))
+                        .top(px(y as f32 - 27.))
+                        .size(px(24.))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.selection = vec![id];
+                                this.line = None;
+                                this.tool = Tool::Select;
+                                window.focus(&this.focus);
+                                cx.notify();
+                            },
+                        )),
+                    );
+                }
+            }
+            let mut preview = self.tool_points.clone();
+            if let Some((a, b, _)) = self.marquee {
+                preview = vec![a, [b[0], a[1]], b, [a[0], b[1]], a];
+            }
+            if !preview.is_empty()
+                && let Some(p) = self.hover
+            {
+                preview.push(p)
+            }
+            if let (Some(a), Some(b)) = (self.anchor, self.hover)
+                && (self.tool == Tool::Circle || self.tool == Tool::Arc)
+            {
+                let start = self.arc_start.unwrap_or(b);
+                let radius = (start[0] - a[0]).hypot(start[1] - a[1]);
+                let angle = (start[1] - a[1]).atan2(start[0] - a[0]);
+                let sweep = if self.arc_start.is_some() {
+                    ((b[1] - a[1]).atan2(b[0] - a[0]) - angle).rem_euclid(std::f64::consts::TAU)
+                } else {
+                    std::f64::consts::TAU
+                };
+                preview = (0..=96)
+                    .map(|i| {
+                        let t = angle + sweep * i as f64 / 96.;
+                        [a[0] + radius * t.cos(), a[1] + radius * t.sin()]
+                    })
+                    .collect();
             }
             let overlay = SketchCanvas {
                 bounds: self.bounds.clone(),
@@ -1835,8 +2516,15 @@ mod implementation {
                 coords,
                 lines,
                 annotations,
-                selected: self.line,
-                anchor: self.anchor,
+                selected: self.selection.clone(),
+                preview,
+                dimensions,
+                point_colors,
+                anchor: if matches!(self.tool, Tool::Line | Tool::Rectangle) {
+                    self.anchor
+                } else {
+                    None
+                },
                 hover: self.hover,
                 rectangle: self.tool == Tool::Rectangle,
                 scale: self.scale,
@@ -1853,6 +2541,7 @@ mod implementation {
                 .bg(rgb(t::VIEWPORT))
                 .child(wgpu_surface(self.gpu.surface.clone()).absolute().inset_0())
                 .child(overlay.element())
+                .children(constraint_markers)
                 .when(self.mode == Mode::Drawing, |el| {
                     el.child(
                         div()
@@ -1881,6 +2570,7 @@ mod implementation {
                     .absolute()
                     .inset_0(),
                 )
+                .child(self.browser(cx))
                 .child(self.navigation(cx))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1891,7 +2581,12 @@ mod implementation {
                         window.focus(&this.focus);
                         this.menu = None;
                         if this.sketch {
-                            this.sketch_click(event.position, cx);
+                            this.sketch_click(
+                                event.position,
+                                event.modifiers.shift,
+                                event.modifiers.control || event.modifiers.platform,
+                                cx,
+                            );
                         } else {
                             this.pick(event.position);
                         }
@@ -1913,7 +2608,67 @@ mod implementation {
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                     if this.sketch {
-                        this.hover = this.screen_to_sketch(event.position);
+                        this.hover = this.sketch_position(
+                            event.position,
+                            event.modifiers.control || event.modifiers.platform,
+                        );
+                        if event.pressed_button == Some(MouseButton::Left)
+                            && let Some((id, before, moved)) = &mut this.dimension_drag
+                            && let Some(at) = this.hover
+                            && before.dimension_positions.get(id).is_some_and(|p| {
+                                (p[0] - at[0]).hypot(p[1] - at[1]) * this.scale > 3.
+                            })
+                        {
+                            this.design.dimension_positions.insert(*id, at);
+                            *moved = true;
+                        }
+                        if let Some((_, current, _)) = &mut this.marquee
+                            && let Some(p) = this.hover
+                        {
+                            *current = p
+                        }
+                        if event.pressed_button == Some(MouseButton::Left)
+                            && let Some(drag) = &this.sketch_drag
+                            && let Some(at) = this.hover
+                        {
+                            let delta = [at[0] - drag.start[0], at[1] - drag.start[1]];
+                            if delta[0].hypot(delta[1]) * this.scale > 2. {
+                                let mut candidate = drag.before.clone();
+                                for p in &mut candidate.points {
+                                    if drag.points.contains(&p.id) {
+                                        p.xy[0] += delta[0];
+                                        p.xy[1] += delta[1];
+                                    }
+                                }
+                                if let Ok(parameters) =
+                                    crate::parameters::expression::evaluate(&candidate)
+                                    && let Ok(solution) = crate::solver::nonlinear::solve_drag(
+                                        &candidate,
+                                        &parameters,
+                                        &candidate
+                                            .points
+                                            .iter()
+                                            .filter(|p| drag.points.contains(&p.id))
+                                            .map(|p| (p.id, p.xy))
+                                            .collect::<Vec<_>>(),
+                                    )
+                                    && solution.conflicts.is_empty()
+                                {
+                                    for (p, xy) in candidate.points.iter_mut().zip(&solution.points)
+                                    {
+                                        p.xy = *xy
+                                    }
+                                    this.design = candidate;
+                                    this.solved = solution.points;
+                                    this.point_dof = solution.point_dof;
+                                    if !this.sketch_drag.as_ref().unwrap().moved {
+                                        this.revision = this.revision.wrapping_add(1);
+                                    }
+                                    this.sketch_drag.as_mut().unwrap().moved = true;
+                                }
+                            }
+                        }
+                        cx.notify();
                     }
                     let Some(drag) = &mut this.drag else {
                         return;
@@ -1941,6 +2696,14 @@ mod implementation {
                     this.changed_camera();
                     cx.notify();
                 }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_sketch_drag(false, cx)),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.finish_sketch_drag(false, cx)),
+                )
                 .on_mouse_up(
                     MouseButton::Middle,
                     cx.listener(|this, _, _, _| this.drag = None),
@@ -2096,6 +2859,7 @@ mod implementation {
             {
                 match result.solution {
                     Ok(solution) => {
+                        self.point_dof = solution.point_dof;
                         self.solved = solution.points;
                         self.status = if self.design.points.is_empty() {
                             "Ready".into()
@@ -2108,6 +2872,10 @@ mod implementation {
                         } else {
                             format!("{} conflicting constraints", solution.conflicts.len())
                         };
+                        if solution.conflicts.is_empty() && !solution.redundant.is_empty() {
+                            self.status
+                                .push_str(&format!(" · {} redundant", solution.redundant.len()));
+                        }
                         self.conflicts = solution.conflicts;
                     }
                     Err(e) => self.error = Some(e),
@@ -2152,20 +2920,10 @@ mod implementation {
             window.on_next_frame(move |_, cx| {
                 let _ = entity.update(cx, |_, cx| cx.notify());
             });
-            let status = self.error.clone().unwrap_or_else(|| {
-                if self.before_construction {
-                    "Before construction".into()
-                } else if self.mode == Mode::Drawing {
-                    "Drawing · Not implemented".into()
-                } else {
-                    self.status.clone()
-                }
-            });
             let mut main = div()
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.browser(cx))
                 .child(self.scene_element(cx));
             if let Some(inspector) = self.inspector(cx) {
                 main = main.child(inspector);
@@ -2179,7 +2937,7 @@ mod implementation {
                 .bg(rgb(t::VIEWPORT))
                 .text_color(rgb(t::TEXT))
                 .font_family("sans-serif")
-                .text_size(px(12.))
+                .text_size(px(14.))
                 .track_focus(&self.focus)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     this.keyboard(event, window, cx)
@@ -2207,14 +2965,15 @@ mod implementation {
                                 } else {
                                     t::MUTED
                                 }))
-                                .child(status),
+                                .child(self.error.clone().unwrap_or_else(|| {
+                                    if self.conflicts.is_empty() {
+                                        format!("{} · {}", self.tool_prompt(), self.status)
+                                    } else {
+                                        format!("{} conflicting constraints", self.conflicts.len())
+                                    }
+                                })),
                         )
-                        .child(
-                            div().text_color(rgb(t::MUTED)).child(
-                                self.volume
-                                    .map_or("mm".into(), |v| format!("{:.0} mm³", v * 1e9)),
-                            ),
-                        ),
+                        .child(div().text_color(rgb(t::MUTED)).child("mm")),
                 )
                 .children(menu)
         }

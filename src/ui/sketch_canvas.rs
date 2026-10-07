@@ -7,6 +7,7 @@ mod implementation {
     use gpui::{prelude::*, *};
     use std::{cell::Cell, rc::Rc};
     use uuid::Uuid;
+    pub type LinearDimension = ([[f64; 2]; 2], [f64; 2], Option<[f64; 2]>);
     pub struct SketchCanvas {
         pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
         pub active: bool,
@@ -14,9 +15,12 @@ mod implementation {
         pub grid: bool,
         pub axes: bool,
         pub coords: Vec<[f64; 2]>,
-        pub lines: Vec<(Uuid, [[f64; 2]; 2])>,
+        pub lines: Vec<(Uuid, Vec<[f64; 2]>, u32, bool)>,
+        pub preview: Vec<[f64; 2]>,
+        pub dimensions: Vec<LinearDimension>,
+        pub point_colors: Vec<u32>,
         pub annotations: Vec<([f64; 2], String)>,
-        pub selected: Option<Uuid>,
+        pub selected: Vec<Uuid>,
         pub anchor: Option<[f64; 2]>,
         pub hover: Option<[f64; 2]>,
         pub rectangle: bool,
@@ -94,25 +98,61 @@ mod implementation {
                     if !self.visible {
                         return;
                     }
-                    for (id, [a, b]) in &self.lines {
-                        stroke(
-                            screen(*a),
-                            screen(*b),
-                            if Some(*id) == self.selected {
+                    for (id, points, color, construction) in &self.lines {
+                        for [a, b] in points.windows(2).map(|p| [p[0], p[1]]) {
+                            let a = screen(a);
+                            let b = screen(b);
+                            let color = if self.selected.contains(id) {
                                 t::WARNING
                             } else {
-                                t::ACCENT
-                            },
-                            1.5,
-                            window,
-                        );
+                                *color
+                            };
+                            if *construction {
+                                let delta = b - a;
+                                let length = f64::from(delta.x).hypot(f64::from(delta.y));
+                                let segments = (length / 6.).ceil().max(1.) as usize;
+                                for i in (0..segments).step_by(2) {
+                                    let start = i as f32 / segments as f32;
+                                    let end = ((i + 1) as f32 / segments as f32).min(1.);
+                                    stroke(a + delta * start, a + delta * end, color, 1.5, window)
+                                }
+                            } else {
+                                stroke(a, b, color, 1.5, window)
+                            }
+                        }
                     }
-                    for p in &self.coords {
+                    for (index, p) in self.coords.iter().enumerate() {
                         let p = screen(*p);
                         window.paint_quad(fill(
-                            Bounds::new(p - point(px(2.), px(2.)), size(px(4.), px(4.))),
-                            rgb(t::TEXT),
+                            Bounds::new(p - point(px(2.5), px(2.5)), size(px(5.), px(5.))),
+                            rgb(self.point_colors.get(index).copied().unwrap_or(t::ACCENT)),
                         ));
+                    }
+                    for (ends, at, direction) in &self.dimensions {
+                        let a = screen(ends[0]);
+                        let b = screen(ends[1]);
+                        let at = screen(*at);
+                        let delta = direction
+                            .map(|v| point(px(v[0] as f32), px(-v[1] as f32)))
+                            .unwrap_or(b - a);
+                        let len = f64::from(delta.x).hypot(f64::from(delta.y)).max(1e-6) as f32;
+                        let normal = point(-delta.y / len, delta.x / len);
+                        let project = |p: Point<Pixels>| {
+                            let offset = f64::from(at.x - p.x) as f32 * f64::from(normal.x) as f32
+                                + f64::from(at.y - p.y) as f32 * f64::from(normal.y) as f32;
+                            p + normal * offset
+                        };
+                        let aa = project(a);
+                        let bb = project(b);
+                        stroke(a, aa, t::MUTED, 1., window);
+                        stroke(b, bb, t::MUTED, 1., window);
+                        stroke(aa, bb, t::MUTED, 1., window);
+                        let tick = point(px(4.), px(-4.));
+                        stroke(aa - tick, aa + tick, t::MUTED, 1., window);
+                        stroke(bb - tick, bb + tick, t::MUTED, 1., window);
+                    }
+                    for pair in self.preview.windows(2) {
+                        stroke(screen(pair[0]), screen(pair[1]), t::WARNING, 1.5, window);
                     }
                     for (index, (position, text)) in self.annotations.iter().enumerate() {
                         let offset = self.annotations[..index]
@@ -135,7 +175,7 @@ mod implementation {
                         };
                         let line = window.text_system().shape_line(text, px(11.), &[run], None);
                         let _ = line.paint(
-                            screen(*position) + point(px(7.), px(-18. - offset * 15.)),
+                            screen(*position) + point(px(7.), px(-14. - offset * 15.)),
                             px(15.),
                             window,
                             cx,

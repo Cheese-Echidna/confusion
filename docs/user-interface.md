@@ -10,11 +10,11 @@ Future tools reuse those icons as placeholders.
 
 - Top left: Open, New, Export, Save, Undo and Redo. Open and initial Save show a local
   path editor; confirm using its icon. Export lists STEP and STL as not implemented.
-- Solid, Sketch and Drawing tabs choose the tool context. The ribbon shows compact
-  tool groups; each group menu exposes its complete named tool list. Hover tooltips
+- Open designs occupy separate named tabs with close buttons and a plus to create a new design; each tab keeps its own design and undo/redo stacks. The large workspace dropdown at the left of the ribbon selects Solid, Sketch or Drawing. The ribbon shows compact
+  tool groups; each group menu exposes its complete named tool list and a pin toggle. Pinned tools persist in the single local JSON settings file at `$XDG_CONFIG_HOME/confusion/settings.json` (default `~/.config/confusion/settings.json`), preserving unrelated settings fields. Hover tooltips
   identify icons and unsupported tools. Unsupported commands also report their status
   when clicked. Drawing currently displays a sheet placeholder.
-- The tree includes collapsible Construction, Sketches, Bodies, Components, Origin
+- The floating tree overlays the viewport and includes collapsible Construction, Sketches, Bodies, Components, Origin
   and Analysis categories. Components are organizational collections of separate
   bodies; their creation and editing tools are placeholders pending the backend.
 - The upper right has the orientation cube, Home, projection, Fit, Grid, Snap and view
@@ -37,7 +37,7 @@ remain stable when parameters change. Extrude references its source sketch by ID
 Clicking a sketch edits its parameters and evaluates the construction through that
 sketch; downstream extrusion intent remains in the canonical design. Restoring the
 end regenerates the extrusion using the current parameters. Clicking the extrusion
-opens its depth editor. Navigation buttons move the evaluation marker.
+opens its depth editor. Drag the narrow marker left or right to move the evaluation point, including before the first feature; no timeline transport buttons are shown.
 
 Saving writes current feature definitions and dependencies to version 2 `.con`.
 Version 1 files load with a synthesized construction sequence. No previous parameter
@@ -62,3 +62,21 @@ the sketch timeline entry to 60 mm, and observed volume change from 8,000 to
 Projection, cube selection, constrained/free orbit and a 900 × 650 window were
 also exercised. Automated checks passed 18 tests, desktop Clippy and the GPU smoke
 check on an NVIDIA RTX 3080 Ti.
+
+The revised shell uses 40 px tool buttons, 28 px artwork and 14 px interface text.
+The footer only displays errors when needed and `mm` at the right, with no Ready
+message or volume counter. The semantic artwork checklist is in
+[Icon inventory](icon-inventory.md), with a matching CSV for icon-pack production.
+
+Native checks for the document-tab revision covered creating a rectangle, opening a
+second blank document, returning to the original sketch, extruding it, and dragging
+the marker back to the sketch and forward to the complete solid. A local file opened
+in a named second tab; closing it retained the first tab. Pinning Sweep added a fourth
+Create tool and survived a fresh launch using an isolated settings directory. The
+settings test confirms that unrelated JSON keys survive and malformed JSON is not
+overwritten. The current suite passes 19 tests and desktop Clippy.
+
+
+## Expanded sketch workflow
+
+The sketch implementation now includes curved geometry, dimension placement and editing, constraint icons, constrained dragging, crossing/window selection, measure, linked offsets, trim/extend, fillets, and transforms. The footer reports sketch DOF and redundancy during editing. See [Sketch workflow](parametric-workflow.md) for current controls, configurable shortcuts, a fully constrained example, and implementation limits. This section supersedes earlier descriptions of sketch tools as placeholders; tools still marked **Not implemented** remain unavailable. The current `.con` format is version 3.

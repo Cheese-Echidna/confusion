@@ -5,6 +5,26 @@ use crate::document::schema::Design;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 pub fn closed_profile(d: &Design, xy: &[[f64; 2]]) -> Result<Vec<[f64; 2]>, String> {
+    if !d
+        .circles
+        .iter()
+        .all(|c| d.construction_geometry.contains(&c.id))
+        || !d
+            .ellipses
+            .iter()
+            .all(|c| d.construction_geometry.contains(&c.id))
+        || !d
+            .splines
+            .iter()
+            .all(|c| d.construction_geometry.contains(&c.id))
+    {
+        return Err("Curved profiles require the sketch profile evaluator".into());
+    }
+    let mut filtered = d.clone();
+    filtered
+        .lines
+        .retain(|l| !d.construction_geometry.contains(&l.id));
+    let d = &filtered;
     if d.lines.len() < 3 {
         return Err("Draw a closed profile with at least three lines".into());
     }

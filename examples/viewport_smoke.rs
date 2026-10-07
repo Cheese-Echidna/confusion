@@ -133,6 +133,28 @@ fn main() -> Result<()> {
     let camera = Camera::default();
     renderer.render(&view, &camera, 0);
     let image = read_color(&renderer, &color)?;
+    // Flat-shaded cube faces plus the background have four colors without AA.
+    // Extra coverage colors prove that the resolved silhouette is antialiased.
+    let coverage_colors: std::collections::BTreeSet<_> = image
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
+    assert!(
+        coverage_colors.len() > 8,
+        "MSAA silhouette has no fractional coverage"
+    );
+    renderer.set_grid(true, true);
+    renderer.render(&view, &camera, 0);
+    let grid_image = read_color(&renderer, &color)?;
+    assert!(grid_image != image, "Grid did not render in the MSAA pass");
+    assert!(
+        (1..=6).contains(&pick(&renderer, [400, 300], 41)?),
+        "Grid interfered with solid picking"
+    );
+    renderer.set_grid(false, true);
+
     let mut compositor_renderer = ViewportRenderer::new(
         device.clone(),
         renderer.queue().clone(),

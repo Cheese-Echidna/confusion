@@ -149,3 +149,11 @@ Next, connect evaluated solid tessellation and semantic topology IDs to the scen
 then build the constrained-sketch -> extrusion vertical workflow. Keep this mesh
 fixture and smoke check as renderer regressions while replacing the proof UI with
 application sessions and configurable semantic commands.
+
+## Anti-aliasing
+
+The current solid and XY ground-grid color pass uses 4× MSAA with matching depth samples. Coverage resolves into a linear-light image before a presentation pass encodes it for GPUI's unorm surface or the standalone sRGB target. Face IDs are rendered separately at one sample per pixel, preserving exact integer picking. Color, depth, resolve, and picking attachments are recreated together on resize.
+
+Native icons rasterize at the requested logical size multiplied by the window's display scale, with GPUI's built-in 2× SVG supersampling. A bounded cache keys images by icon name and physical display size. The supplied artwork and palette stay intact; the old large intrinsic raster followed by severe bilinear minification is bypassed.
+
+The GPU smoke check covers fractional silhouette coverage, the MSAA grid, exact picking, both color output formats, and resizing. A desktop unit check verifies icon sizes and fractional alpha coverage at 16, 28, and 56 physical pixels.

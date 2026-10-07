@@ -25,13 +25,17 @@ nix-shell --run 'cargo run --features desktop --locked'
 On other systems, install OCCT and GPUI's native prerequisites, set
 `OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR`, and run `cargo run --features desktop`.
 
-The GPUI shell includes Solid, Sketch and Drawing tabs, contextual icon ribbons,
-a collapsible document tree, a camera cube, view controls and a construction timeline.
+The GPUI shell includes open-design tabs, a Solid/Sketch/Drawing workspace dropdown,
+pinnable contextual icon ribbons, a floating document tree, a camera cube, view controls
+and a construction timeline with a draggable marker.
 Feature menus include future tools marked **Not implemented**.
 
-Press **R**, then click opposite corners to draw a dimensioned rectangle. Open
-Parameters from the Modify menu to change its dimensions. Press **E** to edit
-extrusion depth and use the apply icon. Open and Save use a local path editor.
+Choose **Create sketch**, then use **R**, **L**, or **C** to draw geometry. Use **D**
+to add driving dimensions, constraint tools to define relationships, and **I** to
+measure selections. Drag points and lines to edit under constraints. The sketch
+menus also include arcs, ellipses, splines, slots, trim, offset, and transforms.
+Press **E** to extrude a closed line, circle, or arc region, including holes. Select a boundary curve first when choosing among multiple regions. Open and Save use a local
+path editor. Ellipse/spline extrusion and complete Fusion parity remain unfinished.
 See the [UI guide](docs/user-interface.md) and
 [workflow guide](docs/parametric-workflow.md) for controls and current limits.
 

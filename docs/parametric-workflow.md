@@ -1,102 +1,50 @@
-> The current shell and controls are documented in [User interface](user-interface.md).
+# Sketch workflow
 
-# Planar sketch → parametric solid
+Run `nix-shell --run 'cargo run --features desktop --locked'`, then choose **Create sketch** to enter the XY sketch workspace.
 
-This implementation connects the previously validated GPU viewport to an owned local
-CAD document, a background constraint solver, exact OCCT extrusion, and `.con` storage.
-It is the first complete modeling path within the larger feature-parity architecture.
+- **L**, **R**, and **C** create line chains, rectangles, and center circles. Creation menus also offer center rectangles, arcs, ellipses, polygons, slots, fit splines, and points. Escape ends the current tool.
+- Select points or curves; Shift adds to the selection. Drag endpoints or selected geometry to reshape it while preserving constraints. Left-to-right box selection contains geometry; right-to-left selection crosses it. Ctrl+A selects all sketch geometry.
+- **D** creates a dimension from the selection. Place its annotation, enter a value or expression, and press Enter. Bare values use millimetres or degrees. Two points support horizontal, vertical, or aligned distances; lines support length, separation, and angle; circles and arcs support diameter and radius. Annotations can be moved and existing dimensions switched between driving and driven.
+- Constraint menus provide coincidence, horizontal/vertical, parallel, perpendicular, equal, collinear, midpoint, point-on-curve, concentric, tangent, symmetry, and Fix/Unfix. Constraint icons can be selected and deleted. Available relations depend on the geometry selected.
+- Free geometry is blue, constrained geometry uses the light foreground color of the dark theme, fixed geometry is green, and conflicting geometry is red. The footer reports remaining degrees of freedom and local redundancy.
+- **I** measures selected geometry. **T** trims, **O** offsets, **F** fillets, **M** moves, and **X** toggles construction. Modify menus include break, extend, mirror, scale, and rectangular/circular copies. Offsets remain parametrically linked to their source geometry.
+- Hold Ctrl/Cmd while placing geometry to suppress snapping and inferred constraints. Middle/right drag pans; the wheel zooms. **S** searches tools. Ctrl+Z and Ctrl+Shift+Z undo and redo.
 
-## Try it
+Parameters support named dependencies, length and angle units, arithmetic, integer powers, square roots, and trigonometric functions. Invalid units, cycles, and conflicting dimensions produce errors. Editing uses candidate documents so failed edits do not corrupt the saved intent.
 
-Run `nix-shell --run 'cargo run --features desktop --locked'`.
+## Complex acceptance sketch
 
-1. Press **R** or choose **Rectangle**, then click two opposite corners. The XY sketch
-   creates four shared endpoint IDs, four horizontal/vertical constraints, a fixed
-   corner, and driving `width` and `height` parameters. The status should read
-   **Fully constrained**.
-2. Change a parameter expression in the sidebar and click **Apply**. Length literals
-   accept `mm`, `cm`, `m`, and `in`. Expressions can reference other named lengths,
-   such as `width / 2 + 5 mm`. Arithmetic is dimensional; cycles and invalid units fail.
-3. Enter `10 mm` in **Extrusion depth**, then click **Extrude / update**. OCCT builds
-   and validates an exact B-rep prism, calculates volume, and derives the GPU mesh.
-4. Change `width` again and click **Apply**: the sketch and solid regenerate. Use
-   **Edit sketch** to inspect the solved profile and its dimension annotations.
-5. Enter a writable path ending in `.con` in the Document field, then click **Save**.
-   **Open** loads that path and regenerates the sketch/solid from its intent.
+Open [complex-sketch.con](assets/complex-sketch.con): an 80 × 50 mm plate, four Ø6 mm holes positioned by margin expressions, and a centered slot. It has zero remaining degrees of freedom. Change `width` to `100 mm` in Parameters; the plate, hole positions, and slot regenerate.
 
-**L** draws connected line chains; click successive endpoints and **Escape** ends
-creation. Nearby existing endpoints snap to the same point ID. Horizontal/vertical
-segments infer their corresponding constraints. Click a line in selection mode to
-apply horizontal, vertical, fixed-start-point, or driving length constraints. The
-sidebar also lets you remove its constraints to recover from a conflict.
+Rebuild and validate the saved example with:
 
-The sketch snaps to a 1 mm grid. Middle/right drag pans the sketch; scrolling zooms.
-In model mode, click selects a face, middle drag pans, right/Shift+middle drag orbits,
-scrolling zooms, and **F** fits. The projection toolbar switches perspective/orthographic.
-**Ctrl+Z/Ctrl+Y**, with the viewport focused, undo/redo document edits in memory.
-Input fields support selection, clipboard and printable keyboard input; edits are committed by
-Apply or Extrude, not by typing. Keymap configuration remains future work.
+```sh
+nix-shell --run 'cargo run --features solver --example sketch_workflow --locked -- docs/assets/complex-sketch.con'
+```
 
-## Boundaries and data flow
+## Configurable shortcuts
 
-- `document/schema.rs`: current SI-valued intent and UUID references. Shared endpoints
-  encode coincidence without an additional residual. Constraints and extrusion depth
-  reference parameter UUIDs; expression names currently cannot be renamed in the UI.
-- `parameters/expression.rs`: bounded, safe parser with dimensional checks and
-  dependency-cycle detection. All named parameters in this workflow are lengths.
-- `solver/nonlinear.rs`: analytic residual/Jacobian rows evaluated with Rayon; faer
-  solves damped normal equations and computes singular values for local DOF. Coordinates
-  are scaled to millimetres internally. Nonzero residuals identify affected constraint
-  IDs; these are not a minimal unsatisfiable constraint set. Redundancy classification,
-  decomposition and advanced nonlinear continuation remain architecture work.
-- `runtime/worker.rs`: owned immutable snapshots, one replaceable pending request and one replaceable result slot,
-  cancellation between solve iterations, revision filtering, and worker-local OCCT.
-  Native meshing cannot be interrupted mid-call. The UI never accepts an obsolete
-  revision, and clears its solid when a new evaluation is requested or fails.
-- `sketch/profiles.rs`: validates a single simple closed loop; rejects open, branching,
-  disconnected, degenerate and self-intersecting profiles before native evaluation.
-- `kernel/bridge.rs`, `kernel/native/occt.cpp`: value-only CXX boundary, OCCT 7.9.3 in
-  the Nix environment. Exact B-rep and triangulation ownership never cross FFI. Native
-  millimetres become SI values at the boundary. Face IDs identify the current display
-  mesh only; persistent topological naming and keeping exact shape sessions for further
-  feature operations are not implemented by this extrusion adapter.
-- `persistence/container.rs`: version-1 ZIP with `manifest.json` and `design.json`,
-  structural checks, size limits and atomic replacement in the destination directory.
-  Version 2 saves current construction features and dependencies; version 1 designs
-  are migrated on load. No solver results, triangles, B-rep cache or parameter edit history
-  are stored. Undo is session
-  memory only. The UI refuses to overwrite an existing path it has not opened/saved.
-- `ui/viewport.rs`: document/gesture orchestration and mode-sensitive navigation.
-  Sketch graphics use GPUI's GPU compositor; solid rendering and picking use shared
-  wgpu device/queue resources. Metres are multiplied by 25 for display only.
+The existing single settings JSON file accepts command-to-chord overrides. Restart to load changes. A null value disables a command's shortcut. Modeling shortcuts are suppressed when a text field has focus.
 
-## Current limits
+```json
+{
+  "keybindings": {
+    "sketch": { "sketch-line": "shift-l", "sketch-circle": null },
+    "global": { "undo": "ctrl-z" }
+  }
+}
+```
 
-One XY sketch, straight lines, one simple profile and one positive-depth new-body
-extrusion. No arcs, circles, holes, profile chooser, multiple bodies/components,
-booleans, imported geometry, STEP/STL export, or drawings yet. No native file picker
-or autosave yet; the Document field takes a local path. The sketch currently limits
-128 points, 128 lines, 256 constraints and 128 length parameters to bound dense solves.
-The pinned WGPUI cross/winit backend has no IME event forwarding yet; the input handler
-implements UTF-16 composition contracts, but real IME composition remains unvalidated
-and requires a backend change. Continuous redraw inherited from the viewport experiment still needs idle scheduling.
-This workflow does not claim Fusion feature parity; the architecture remains the full
-roadmap for sketches, solids, components and drawings, with no cloud services.
+## Implementation and current limits
 
-## Validation
+The solver uses damped least-squares QR, analytic and numerical Jacobians, and SVD to report local point freedom. Drag targets are temporary soft objectives; permanent constraints take precedence. Redundancy is a local rank diagnostic, not a minimal conflict explanation. Curves are sampled for display and some measurements are approximate.
 
-`tests/parametric_workflow.rs` exercises dimensional expressions/cycles, schema reference
-validation, reverse-corner rectangles, DOF/conflicts, invalid profiles, intent-only
-save/reopen, and exact volume/dimension regeneration through the real native kernel.
-Run `nix-shell --run 'cargo test --features solver,kernel'` and
-`nix-shell --run 'cargo clippy --all-targets --features desktop -- -D warnings'`.
+Version 4 `.con` files preserve geometry, constraints, expressions, construction flags, annotations, and driven dimensions; older versions remain readable. Undo history and derived meshes are not serialized.
 
-Native X11/Xvfb verification on the RTX 3080 Ti also covered rectangle creation,
-printable text editing, named expressions, extrusion, Save → New → Open regeneration,
-conflict identification and undo, line-chain closure/DOF, GPU face selection, and window
-resize. Headless checks, native integration tests, strict Rust Clippy, formatting and the
-GPU smoke checks passed. Windows, macOS, Wayland and real IME composition are unverified.
+This is not complete Fusion parity. Sketches currently use a single XY plane. Projection, sketch text, general conics, curvature continuity, complete spline/ellipse constraints, associative editable pattern definitions, and a graphical shortcut editor remain unfinished. Patterns currently create copies with internal constraints and shared parameter references. Sketch documents are bounded to 128 points, 128 curves, 256 constraints, and 128 parameters.
 
-![Solved parameter-driven sketch](assets/parametric-sketch.png)
+Exact OCCT extrusion accepts closed regions made of lines, circles, and circular arcs, including nested holes and slots. Press **E** with no selection to extrude the single outer region. For multiple outlines, select one boundary curve and press **E**; select a hole boundary to extrude its interior instead. An existing extrusion retains its selected boundary when edited without a selection.
 
-![Regenerated exact solid with named parameter expression](assets/parametric-model.png)
+Extrusion stores the selected outer boundary's curve IDs in version 4 `.con` files. Parameter edits and save/reopen retain that region; deleting or replacing its boundary requires explicit reselection. Earlier file versions remain readable and use automatic selection. Open, branching, intersecting, or touching contours are rejected. Ellipses and splines must be construction geometry for this extrusion workflow.
+
+The complex acceptance sketch can now be extruded as a plate with four circular holes and the center slot. Width changes regenerate the exact solid, including hole positions and slot length. Region classification uses sampled curves; the native solid uses exact OCCT lines and circular arcs and is checked for validity.

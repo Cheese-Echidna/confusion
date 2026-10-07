@@ -23,6 +23,13 @@ mod implementation {
         device: wgpu::Device,
         queue: wgpu::Queue,
         pipeline: wgpu::RenderPipeline,
+        pick_pipeline: wgpu::RenderPipeline,
+        multisample_color: wgpu::TextureView,
+        multisample_depth: wgpu::TextureView,
+        resolve_view: wgpu::TextureView,
+        resolve_pipeline: wgpu::RenderPipeline,
+        resolve_layout: wgpu::BindGroupLayout,
+        resolve_bindings: wgpu::BindGroup,
         vertices: wgpu::Buffer,
         indices: wgpu::Buffer,
         index_count: u32,
@@ -82,8 +89,10 @@ mod implementation {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Shaded solid + GPU face IDs"),
+            let output_format = format;
+            let format = wgpu::TextureFormat::Rgba16Float;
+            let descriptor = wgpu::RenderPipelineDescriptor {
+                label: Some("4x MSAA shaded solid"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -97,14 +106,18 @@ mod implementation {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fragment_main"),
-                    targets: &[
-                        Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                        Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    ],
+                    entry_point: Some("fragment_color"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                     compilation_options: Default::default(),
                 }),
-                primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(true),
@@ -112,6 +125,91 @@ mod implementation {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
+                multisample: wgpu::MultisampleState {
+                    count: 4,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            };
+            let pipeline = device.create_render_pipeline(&descriptor);
+            let pick_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Single sample face picking"),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fragment_pick"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R32Uint,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multisample: Default::default(),
+                ..descriptor
+            });
+            let (multisample_color, multisample_depth) =
+                Self::multisample_targets(&device, size, format);
+            let resolve_view = Self::resolve_target(&device, size);
+            let resolve_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Linear resolve layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+            let resolve_bindings =
+                Self::resolve_bindings(&device, &resolve_layout, &uniforms, &resolve_view);
+            let resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Linear light MSAA resolve"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/resolve.wgsl").into()),
+            });
+            let resolve_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Viewport presentation"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[Some(&resolve_layout)],
+                        immediate_size: 0,
+                    }),
+                ),
+                vertex: wgpu::VertexState {
+                    module: &resolve_shader,
+                    entry_point: Some("vertex_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &resolve_shader,
+                    entry_point: Some("fragment_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: output_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
                 multisample: Default::default(),
                 multiview_mask: None,
                 cache: None,
@@ -135,6 +233,13 @@ mod implementation {
                 device,
                 queue,
                 pipeline,
+                pick_pipeline,
+                multisample_color,
+                multisample_depth,
+                resolve_view,
+                resolve_pipeline,
+                resolve_layout,
+                resolve_bindings,
                 vertices,
                 indices,
                 index_count: mesh_indices.len() as u32,
@@ -144,7 +249,7 @@ mod implementation {
                 pick_texture,
                 pick_view,
                 size,
-                encode_srgb: !format.is_srgb(),
+                encode_srgb: !output_format.is_srgb(),
                 grid,
                 show_grid: false,
                 show_axes: true,
@@ -212,10 +317,88 @@ mod implementation {
             (depth, pick_texture, pick_view)
         }
 
+        fn multisample_targets(
+            device: &wgpu::Device,
+            size: [u32; 2],
+            format: wgpu::TextureFormat,
+        ) -> (wgpu::TextureView, wgpu::TextureView) {
+            let target = |format, label| {
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some(label),
+                        size: wgpu::Extent3d {
+                            width: size[0],
+                            height: size[1],
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 4,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+            };
+            (
+                target(format, "4x MSAA viewport color"),
+                target(wgpu::TextureFormat::Depth32Float, "4x MSAA viewport depth"),
+            )
+        }
+
+        fn resolve_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::TextureView {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Resolved linear viewport"),
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        }
+        fn resolve_bindings(
+            device: &wgpu::Device,
+            layout: &wgpu::BindGroupLayout,
+            uniforms: &wgpu::Buffer,
+            view: &wgpu::TextureView,
+        ) -> wgpu::BindGroup {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Resolved viewport bindings"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                ],
+            })
+        }
         pub fn resize(&mut self, size: [u32; 2]) {
             let size = size.map(|value| value.max(1));
             if self.size != size {
                 (self.depth, self.pick_texture, self.pick_view) = Self::targets(&self.device, size);
+                (self.multisample_color, self.multisample_depth) =
+                    Self::multisample_targets(&self.device, size, wgpu::TextureFormat::Rgba16Float);
+                self.resolve_view = Self::resolve_target(&self.device, size);
+                self.resolve_bindings = Self::resolve_bindings(
+                    &self.device,
+                    &self.resolve_layout,
+                    &self.uniforms,
+                    &self.resolve_view,
+                );
                 self.size = size;
             }
         }
@@ -231,16 +414,6 @@ mod implementation {
         }
         pub fn queue(&self) -> &wgpu::Queue {
             &self.queue
-        }
-
-        fn output_channel(&self, linear: f64) -> f64 {
-            if !self.encode_srgb {
-                linear
-            } else if linear <= 0.0031308 {
-                linear * 12.92
-            } else {
-                1.055 * linear.powf(1.0 / 2.4) - 0.055
-            }
         }
 
         pub fn render(
@@ -264,34 +437,23 @@ mod implementation {
                 });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Solid shading and picking"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: color,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: self.output_channel(0.021219),
-                                    g: self.output_channel(0.021219),
-                                    b: self.output_channel(0.021219),
-                                    a: 1.0,
-                                }),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.pick_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        }),
-                    ],
+                    label: Some("4x MSAA solid and grid"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.multisample_color,
+                        resolve_target: Some(&self.resolve_view),
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.021219,
+                                g: 0.021219,
+                                b: 0.021219,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth,
+                        view: &self.multisample_depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Discard,
@@ -310,6 +472,58 @@ mod implementation {
                 if self.show_grid {
                     self.grid.draw(&mut pass, self.show_axes);
                 }
+            }
+            // Integer face IDs stay single-sampled: never average selectable IDs.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Exact face picking"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.pick_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pick_pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.set_vertex_buffer(0, self.vertices.slice(..));
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Encode resolved viewport"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: color,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.resolve_pipeline);
+                pass.set_bind_group(0, &self.resolve_bindings, &[]);
+                pass.draw(0..3, 0..1);
             }
             self.queue.submit([encoder.finish()])
         }

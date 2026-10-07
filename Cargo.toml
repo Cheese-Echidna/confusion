@@ -49,3 +49,7 @@ png = "0.18"
 [[example]]
 name = "viewport_smoke"
 required-features = ["gpu"]
+
+[[example]]
+name = "sketch_workflow"
+required-features = ["solver"]
