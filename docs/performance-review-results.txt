@@ -1,0 +1,33 @@
+adapter=AdapterInfo { name: "NVIDIA GeForce RTX 3080 Ti", vendor: 4318, device: 8712, device_type: DiscreteGpu, device_pci_bus_id: "0000:26:00.0", driver: "NVIDIA", driver_info: "595.104.02", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: false }
+SKETCH rectangles=1 points=4 constraints=7 solve_ms=(0.113301, 1.113669) edited_solve_ms=(0.240562, 0.293532)
+SKETCH rectangles=10 points=40 constraints=70 solve_ms=(2.5451520000000003, 8.756193000000001) edited_solve_ms=(38.792463, 45.307216999999994)
+SKETCH rectangles=24 points=96 constraints=168 solve_ms=(17.969379, 22.114175) edited_solve_ms=(33.400929000000005, 60.538894000000006)
+SKETCH rectangles=32 points=128 constraints=224 solve_ms=(33.908172, 36.577125) edited_solve_ms=(73.624824, 80.317739)
+MODEL pockets=0 faces=6 triangles=12 rebuild_ms=(7.968516, 9.074605) solve_ms=(0.185132, 0.342173)
+MODEL pockets=1 faces=11 triangles=28 rebuild_ms=(18.499874, 21.040465) solve_ms=(0.34670300000000004, 1.510883)
+MODEL pockets=8 faces=46 triangles=140 rebuild_ms=(137.354575, 146.46112) solve_ms=(1.120469, 1.4070420000000001)
+MODEL pockets=24 faces=126 triangles=396 rebuild_ms=(731.100478, 782.119473) solve_ms=(3.726351, 4.270306)
+RENDER pockets-0 size=[800, 600] grid=false triangles=12 cpu_ms=(0.053001000000000006, 0.071861) completed_frame_ms=(0.22553199999999998, 0.8312470000000001) throughput_fps=9732.8 upload_ms=0.019
+RENDER pockets-0 size=[800, 600] grid=true triangles=12 cpu_ms=(0.04532, 0.076671) completed_frame_ms=(0.12751099999999999, 0.245322) throughput_fps=9447.2 upload_ms=0.019
+RENDER pockets-1 size=[800, 600] grid=false triangles=28 cpu_ms=(0.04705, 0.11028099999999999) completed_frame_ms=(0.117661, 0.240302) throughput_fps=12624.7 upload_ms=0.016
+RENDER pockets-1 size=[800, 600] grid=true triangles=28 cpu_ms=(0.041651, 0.058911) completed_frame_ms=(0.11932100000000001, 0.164022) throughput_fps=10888.4 upload_ms=0.016
+RENDER pockets-8 size=[800, 600] grid=false triangles=140 cpu_ms=(0.04961, 0.147531) completed_frame_ms=(0.12553099999999998, 0.294882) throughput_fps=11077.3 upload_ms=0.019
+RENDER pockets-8 size=[800, 600] grid=true triangles=140 cpu_ms=(0.05549, 0.077791) completed_frame_ms=(0.13897099999999998, 0.207732) throughput_fps=10621.1 upload_ms=0.019
+RENDER pockets-24 size=[800, 600] grid=false triangles=396 cpu_ms=(0.04222, 0.07166) completed_frame_ms=(0.113921, 0.218982) throughput_fps=12002.2 upload_ms=0.023
+RENDER pockets-24 size=[800, 600] grid=true triangles=396 cpu_ms=(0.049221, 0.070631) completed_frame_ms=(0.133821, 0.24459200000000003) throughput_fps=10604.4 upload_ms=0.023
+RENDER cubes-100 size=[800, 600] grid=false triangles=1200 cpu_ms=(0.044001, 0.07153) completed_frame_ms=(0.113861, 0.245462) throughput_fps=11239.0 upload_ms=0.035
+RENDER cubes-100 size=[800, 600] grid=true triangles=1200 cpu_ms=(0.050179999999999995, 0.07876) completed_frame_ms=(0.140601, 0.291772) throughput_fps=9241.8 upload_ms=0.035
+RENDER cubes-10000 size=[800, 600] grid=false triangles=120000 cpu_ms=(0.048151, 0.076171) completed_frame_ms=(0.15964199999999998, 0.337663) throughput_fps=7757.9 upload_ms=2.351
+RENDER cubes-10000 size=[800, 600] grid=true triangles=120000 cpu_ms=(0.049421, 0.075491) completed_frame_ms=(0.179492, 0.33250199999999996) throughput_fps=7222.3 upload_ms=2.351
+RENDER pockets-0 size=[1600, 1200] grid=false triangles=12 cpu_ms=(0.04999, 0.07937) completed_frame_ms=(0.170782, 0.35223299999999996) throughput_fps=7876.0 upload_ms=0.031
+RENDER pockets-0 size=[1600, 1200] grid=true triangles=12 cpu_ms=(0.06013, 0.08045100000000001) completed_frame_ms=(0.206121, 0.443334) throughput_fps=6564.3 upload_ms=0.031
+RENDER pockets-1 size=[1600, 1200] grid=false triangles=28 cpu_ms=(0.047741000000000006, 0.07580100000000001) completed_frame_ms=(0.182161, 0.34384299999999995) throughput_fps=8085.5 upload_ms=0.014
+RENDER pockets-1 size=[1600, 1200] grid=true triangles=28 cpu_ms=(0.048891000000000004, 0.063141) completed_frame_ms=(0.189131, 0.348433) throughput_fps=6550.4 upload_ms=0.014
+RENDER pockets-8 size=[1600, 1200] grid=false triangles=140 cpu_ms=(0.047781000000000004, 0.069321) completed_frame_ms=(0.169711, 0.347163) throughput_fps=7710.0 upload_ms=0.021
+RENDER pockets-8 size=[1600, 1200] grid=true triangles=140 cpu_ms=(0.051421, 0.07474099999999999) completed_frame_ms=(0.192712, 0.37634300000000004) throughput_fps=6356.4 upload_ms=0.021
+RENDER pockets-24 size=[1600, 1200] grid=false triangles=396 cpu_ms=(0.052881, 0.079521) completed_frame_ms=(0.17286100000000001, 0.33003299999999997) throughput_fps=6883.5 upload_ms=0.025
+RENDER pockets-24 size=[1600, 1200] grid=true triangles=396 cpu_ms=(0.046901, 0.06658) completed_frame_ms=(0.189392, 0.337272) throughput_fps=6481.3 upload_ms=0.025
+RENDER cubes-100 size=[1600, 1200] grid=false triangles=1200 cpu_ms=(0.04557, 0.07386100000000001) completed_frame_ms=(0.16084199999999998, 0.312163) throughput_fps=7832.9 upload_ms=0.038
+RENDER cubes-100 size=[1600, 1200] grid=true triangles=1200 cpu_ms=(0.06211, 0.100611) completed_frame_ms=(0.215802, 0.5985539999999999) throughput_fps=5854.1 upload_ms=0.038
+RENDER cubes-10000 size=[1600, 1200] grid=false triangles=120000 cpu_ms=(0.044579999999999995, 0.05967) completed_frame_ms=(0.18840099999999999, 0.384013) throughput_fps=5983.3 upload_ms=2.142
+RENDER cubes-10000 size=[1600, 1200] grid=true triangles=120000 cpu_ms=(0.05168, 0.081211) completed_frame_ms=(0.228182, 0.411953) throughput_fps=5129.5 upload_ms=2.142

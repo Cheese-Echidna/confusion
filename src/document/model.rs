@@ -27,6 +27,7 @@ pub enum ExtrudeOperation {
     NewBody,
     Join,
     Cut,
+    CutNewBody,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,6 +204,7 @@ impl Design {
             .or_else(|| self.extrusion.as_ref().map(|e| e.id))
     }
     pub fn validate_model(&self) -> Result<(), String> {
+        self.validate_modifications()?;
         use std::collections::HashSet;
         if self.active_sketch.is_some()
             && !self.construction.iter().any(|f| {
@@ -289,13 +291,15 @@ impl Design {
                 .iter()
                 .find(|p| p.id == feature.depth)
                 .ok_or("Missing extrusion depth parameter")?;
-            if depth.angular {
+            if depth.angular || depth.scalar {
                 return Err("Extrusion depth must have length units".into());
             }
             match (feature.operation, feature.target) {
                 (ExtrudeOperation::NewBody, None) => {}
-                (ExtrudeOperation::Join | ExtrudeOperation::Cut, Some(target))
-                    if available.contains(&target) && consumed.insert(target) => {}
+                (
+                    ExtrudeOperation::Join | ExtrudeOperation::Cut | ExtrudeOperation::CutNewBody,
+                    Some(target),
+                ) if available.contains(&target) && consumed.insert(target) => {}
                 _ => return Err("Invalid solid target: choose a current upstream body".into()),
             }
             if let SketchPlane::Face {

@@ -27,6 +27,11 @@ fn main() {
             "TKBO",
             "TKBool",
             "TKMesh",
+            "TKOffset",
+            "TKFillet",
+            "TKHLR",
+            "TKFeat",
+            "TKShHealing",
         ] {
             println!("cargo:rustc-link-lib={name}");
         }
@@ -34,6 +39,9 @@ fn main() {
             "src/kernel/bridge.rs",
             "src/kernel/native/occt.cpp",
             "src/kernel/native/occt.hpp",
+            "src/kernel/native/solid_create.inc",
+            "src/kernel/native/modify.inc",
+            "src/kernel/native/inspect.hpp",
         ] {
             println!("cargo:rerun-if-changed={file}");
         }

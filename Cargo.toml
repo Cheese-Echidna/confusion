@@ -6,12 +6,13 @@ edition = "2024"
 [features]
 # Headless intent/persistence by default; desktop enables GPU rendering, solver and OCCT.
 default = []
-desktop = ["dep:gpui", "dep:libc", "gpu", "solver", "kernel"]
+desktop = ["dep:rfd", "dep:gpui", "dep:libc", "gpu", "solver", "kernel"]
 gpu = ["dep:wgpu", "dep:bytemuck"]
 solver = ["dep:faer", "dep:rayon"]
 kernel = ["dep:cxx", "dep:cxx-build"]
 
 [dependencies]
+rfd = { version = "0.17.2", optional = true }
 # See docs/libraries.md for selection rationale and native integrations.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -57,3 +58,7 @@ required-features = ["solver"]
 [[example]]
 name = "model_workflow"
 required-features = ["solver", "kernel"]
+
+[[example]]
+name = "performance_review"
+required-features = ["gpu", "solver", "kernel"]

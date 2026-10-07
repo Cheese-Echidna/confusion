@@ -15,3 +15,5 @@ pub mod transaction;
 pub mod validation;
 
 pub mod model;
+
+pub mod dirty;

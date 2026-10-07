@@ -3,7 +3,14 @@
 #pragma once
 #include "rust/cxx.h"
 namespace confusion {
+struct ProfileEdge;
+struct FaceRequest;
+struct Mesh;
+struct ModifyStep;
 struct ModelStep;
+Mesh evaluate_modified_model(rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>);
+struct CreateStep;
+Mesh evaluate_create_model(rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const CreateStep>);
 struct FaceRequest;
 struct Mesh;
 struct ProfileEdge;
@@ -15,3 +22,7 @@ struct Point2;
 struct Mesh;
 Mesh extrude(rust::Slice<const Point2>, double);
 } // namespace confusion
+
+namespace confusion {
+Mesh evaluate_complete_model(rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>, rust::Slice<const CreateStep>);
+}

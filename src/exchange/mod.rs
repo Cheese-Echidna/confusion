@@ -12,3 +12,4 @@ pub mod import;
 pub mod step;
 pub mod stl;
 pub mod svg;
+pub mod three_mf;

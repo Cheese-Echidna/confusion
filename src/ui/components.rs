@@ -103,6 +103,25 @@ mod implementation {
             })
             .tooltip(move |_, cx| cx.new(|_| Tip(tooltip.clone())).into())
     }
+    pub fn constraint_button(
+        id: impl Into<ElementId>,
+        name: &str,
+        label: &str,
+        active: bool,
+    ) -> Stateful<Div> {
+        let tooltip = label.to_owned();
+        div()
+            .id(id)
+            .size(px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(active, |el| el.bg(rgb(t::SELECTED)))
+            .hover(|el| el.bg(rgb(t::HOVER)))
+            .child(icon(name, 11., t::MUTED))
+            .tooltip(move |_, cx| cx.new(|_| Tip(tooltip.clone())).into())
+    }
     pub fn text_button(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,

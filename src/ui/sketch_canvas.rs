@@ -7,8 +7,11 @@ mod implementation {
     use gpui::{prelude::*, *};
     use std::{cell::Cell, rc::Rc};
     use uuid::Uuid;
-    pub type LinearDimension = ([[f64; 2]; 2], [f64; 2], Option<[f64; 2]>);
+    pub type LinearDimension = ([[f64; 2]; 2], [f64; 2], Option<[f64; 2]>, bool);
     pub struct SketchCanvas {
+        pub camera: crate::render::camera::Camera,
+        pub frame: crate::sketch::workplane::Workplane,
+        pub placement_preview: bool,
         pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
         pub active: bool,
         pub visible: bool,
@@ -17,6 +20,8 @@ mod implementation {
         pub coords: Vec<[f64; 2]>,
         pub lines: Vec<(Uuid, Vec<[f64; 2]>, u32, bool)>,
         pub preview: Vec<[f64; 2]>,
+        pub preview_curves: Vec<Vec<[f64; 2]>>,
+        pub region_wires: Vec<Vec<[f64; 2]>>,
         pub dimensions: Vec<LinearDimension>,
         pub point_colors: Vec<u32>,
         pub annotations: Vec<([f64; 2], String)>,
@@ -36,13 +41,18 @@ mod implementation {
                         return;
                     }
                     let screen = |p: [f64; 2]| {
-                        point(
-                            bounds.origin.x
-                                + bounds.size.width * 0.5
-                                + px(((p[0] - self.center[0]) * self.scale) as f32),
-                            bounds.origin.y + bounds.size.height * 0.5
-                                - px(((p[1] - self.center[1]) * self.scale) as f32),
-                        )
+                        let world = self.frame.world(p);
+                        let projected = self
+                            .camera
+                            .project(
+                                nalgebra::Point3::from(world.coords * 25.),
+                                [
+                                    f64::from(bounds.size.width).max(1.) as u32,
+                                    f64::from(bounds.size.height).max(1.) as u32,
+                                ],
+                            )
+                            .unwrap_or([-10000., -10000.]);
+                        bounds.origin + point(px(projected[0] as f32), px(projected[1] as f32))
                     };
                     let stroke = |a: Point<Pixels>,
                                   b: Point<Pixels>,
@@ -71,10 +81,10 @@ mod implementation {
                             if (i == 0 && !self.axes) || (i != 0 && !self.grid) {
                                 continue;
                             }
-                            let x = screen([f64::from(i) * spacing, self.center[1]]).x;
+
                             stroke(
-                                point(x, bounds.top()),
-                                point(x, bounds.bottom()),
+                                screen([f64::from(i) * spacing, min_y]),
+                                screen([f64::from(i) * spacing, max_y]),
                                 if i == 0 { t::SUCCESS } else { 0x343330 },
                                 1.,
                                 window,
@@ -85,10 +95,10 @@ mod implementation {
                             if (i == 0 && !self.axes) || (i != 0 && !self.grid) {
                                 continue;
                             }
-                            let y = screen([self.center[0], f64::from(i) * spacing]).y;
+
                             stroke(
-                                point(bounds.left(), y),
-                                point(bounds.right(), y),
+                                screen([min_x, f64::from(i) * spacing]),
+                                screen([max_x, f64::from(i) * spacing]),
                                 if i == 0 { t::ERROR } else { 0x343330 },
                                 1.,
                                 window,
@@ -97,6 +107,21 @@ mod implementation {
                     }
                     if !self.visible {
                         return;
+                    }
+                    if !self.region_wires.is_empty() {
+                        let mut path = PathBuilder::fill();
+                        for wire in &self.region_wires {
+                            if let Some(first) = wire.first() {
+                                path.move_to(screen(*first));
+                                for p in wire.iter().skip(1) {
+                                    path.line_to(screen(*p));
+                                }
+                                path.close();
+                            }
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, rgba((t::WARNING << 8) | 0x28));
+                        }
                     }
                     for (id, points, color, construction) in &self.lines {
                         for [a, b] in points.windows(2).map(|p| [p[0], p[1]]) {
@@ -128,28 +153,44 @@ mod implementation {
                             rgb(self.point_colors.get(index).copied().unwrap_or(t::ACCENT)),
                         ));
                     }
-                    for (ends, at, direction) in &self.dimensions {
+                    for (ends, at, direction, radial) in &self.dimensions {
                         let a = screen(ends[0]);
                         let b = screen(ends[1]);
-                        let at = screen(*at);
-                        let delta = direction
-                            .map(|v| point(px(v[0] as f32), px(-v[1] as f32)))
-                            .unwrap_or(b - a);
-                        let len = f64::from(delta.x).hypot(f64::from(delta.y)).max(1e-6) as f32;
-                        let normal = point(-delta.y / len, delta.x / len);
-                        let project = |p: Point<Pixels>| {
-                            let offset = f64::from(at.x - p.x) as f32 * f64::from(normal.x) as f32
-                                + f64::from(at.y - p.y) as f32 * f64::from(normal.y) as f32;
-                            p + normal * offset
+                        if *radial {
+                            let delta = [at[0] - ends[0][0], at[1] - ends[0][1]];
+                            let length = delta[0].hypot(delta[1]).max(1e-12);
+                            let radius = (ends[1][0] - ends[0][0]).hypot(ends[1][1] - ends[0][1]);
+                            let rim = screen([
+                                ends[0][0] + delta[0] / length * radius,
+                                ends[0][1] + delta[1] / length * radius,
+                            ]);
+                            stroke(a, rim, t::MUTED, 1., window);
+                            stroke(rim, screen(*at), t::MUTED, 1., window);
+                            let tick = point(px(3.), px(-3.));
+                            stroke(rim - tick, rim + tick, t::MUTED, 1., window);
+                            continue;
+                        }
+                        let delta =
+                            direction.unwrap_or([ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]]);
+                        let len = delta[0].hypot(delta[1]).max(1e-12);
+                        let normal = [-delta[1] / len, delta[0] / len];
+                        let project = |p: [f64; 2]| {
+                            let offset = (at[0] - p[0]) * normal[0] + (at[1] - p[1]) * normal[1];
+                            screen([p[0] + normal[0] * offset, p[1] + normal[1] * offset])
                         };
-                        let aa = project(a);
-                        let bb = project(b);
+                        let aa = project(ends[0]);
+                        let bb = project(ends[1]);
                         stroke(a, aa, t::MUTED, 1., window);
                         stroke(b, bb, t::MUTED, 1., window);
                         stroke(aa, bb, t::MUTED, 1., window);
                         let tick = point(px(4.), px(-4.));
                         stroke(aa - tick, aa + tick, t::MUTED, 1., window);
                         stroke(bb - tick, bb + tick, t::MUTED, 1., window);
+                    }
+                    for curve in &self.preview_curves {
+                        for pair in curve.windows(2) {
+                            stroke(screen(pair[0]), screen(pair[1]), t::WARNING, 1.5, window);
+                        }
                     }
                     for pair in self.preview.windows(2) {
                         stroke(screen(pair[0]), screen(pair[1]), t::WARNING, 1.5, window);
@@ -180,6 +221,29 @@ mod implementation {
                             window,
                             cx,
                         );
+                    }
+                    if self.placement_preview
+                        && let Some(at) = self.hover
+                    {
+                        let p = screen(at);
+                        stroke(
+                            p - point(px(7.), px(0.)),
+                            p + point(px(7.), px(0.)),
+                            t::WARNING,
+                            1.,
+                            window,
+                        );
+                        stroke(
+                            p - point(px(0.), px(7.)),
+                            p + point(px(0.), px(7.)),
+                            t::WARNING,
+                            1.,
+                            window,
+                        );
+                        window.paint_quad(fill(
+                            Bounds::new(p - point(px(2.), px(2.)), size(px(4.), px(4.))),
+                            rgb(t::WARNING),
+                        ));
                     }
                     if let (Some(a), Some(b)) = (self.anchor, self.hover) {
                         if self.rectangle {

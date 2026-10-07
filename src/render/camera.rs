@@ -144,6 +144,16 @@ impl Camera {
         std::array::from_fn(|column| std::array::from_fn(|row| matrix[(row, column)] as f32))
     }
 
+    pub fn project(&self, position: Point3<f64>, size: [u32; 2]) -> Option<[f64; 2]> {
+        let clip = self.view_projection(size[0], size[1]) * position.to_homogeneous();
+        if clip.w <= 0. || clip.z / clip.w < 0. {
+            return None;
+        }
+        Some([
+            (clip.x / clip.w + 1.) * size[0] as f64 * 0.5,
+            (1. - clip.y / clip.w) * size[1] as f64 * 0.5,
+        ])
+    }
     /// Used by geometric tests and future exact refinement, never as the GPU pick result.
     pub fn ray(&self, pixel: [f64; 2], size: [u32; 2]) -> Option<(Point3<f64>, Vector3<f64>)> {
         if size.contains(&0) {
@@ -177,6 +187,33 @@ mod tests {
             assert!((0.0..1.0).contains(&(clip.z / clip.w)));
             let (origin, direction) = camera.ray([400.0, 300.0], [800, 600]).unwrap();
             assert!((camera.target - origin).normalize().dot(&direction) > 0.999999);
+        }
+    }
+
+    #[test]
+    fn projected_attached_sketch_points_round_trip_through_camera_ray() {
+        let frame = crate::sketch::workplane::Workplane {
+            origin: Point3::new(0.02, 0.03, 0.01),
+            x: Vector3::y(),
+            y: Vector3::z(),
+            normal: Vector3::x(),
+        };
+        for projection in [ProjectionMode::Perspective, ProjectionMode::Orthographic] {
+            let mut camera = Camera {
+                projection,
+                ..Camera::default()
+            };
+            camera.target = Point3::from(frame.origin.coords * 25.);
+            camera.set_direction(frame.normal + frame.x * 0.4, frame.y);
+            let at = [0.012, 0.008];
+            let pixel = camera
+                .project(Point3::from(frame.world(at).coords * 25.), [1100, 575])
+                .unwrap();
+            let (origin, direction) = camera.ray(pixel, [1100, 575]).unwrap();
+            let hit = frame
+                .intersect(Point3::from(origin.coords / 25.), direction)
+                .unwrap();
+            assert!((hit[0] - at[0]).hypot(hit[1] - at[1]) < 1e-10);
         }
     }
 

@@ -48,6 +48,31 @@ pub fn faces(camera: &Camera) -> Vec<CubeFace> {
         })
         .collect()
 }
+pub struct CubeAxis {
+    pub origin: [f64; 2],
+    pub end: [f64; 2],
+    pub color: u32,
+}
+/// Use the nearest visible corner so all three colored edges remain attached to the cube.
+pub fn axes(camera: &Camera) -> [CubeAxis; 3] {
+    let out = camera.outward();
+    let corner = out.map(|v| if v < 0. { -1. } else { 1. });
+    let project = |p: Vector3<f64>| {
+        [
+            62. + p.dot(&camera.right()) * 24.,
+            52. - p.dot(&camera.up()) * 24.,
+        ]
+    };
+    std::array::from_fn(|axis| {
+        let mut end = corner;
+        end[axis] *= -1.;
+        CubeAxis {
+            origin: project(corner),
+            end: project(end),
+            color: [0xe86559, 0x8bbc6b, 0x5a9be6][axis],
+        }
+    })
+}
 pub fn pick(camera: &Camera, p: [f64; 2]) -> Option<CubeFace> {
     faces(camera).into_iter().find(|face| {
         let mut sign = 0.;
@@ -66,4 +91,37 @@ pub fn pick(camera: &Camera, p: [f64; 2]) -> Option<CubeFace> {
         }
         true
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn axes_share_a_corner_and_follow_visible_cube_edges() {
+        let mut camera = Camera::default();
+        for direction in [
+            Vector3::new(1., 1., 1.),
+            Vector3::new(-1., 2., 0.5),
+            Vector3::z(),
+        ] {
+            camera.set_direction(
+                direction,
+                if direction == Vector3::z() {
+                    Vector3::y()
+                } else {
+                    Vector3::z()
+                },
+            );
+            let faces = faces(&camera);
+            let axes = axes(&camera);
+            for axis in &axes {
+                assert_eq!(axis.origin, axes[0].origin);
+                assert!(faces.iter().any(|face| face.polygon.contains(&axis.origin)));
+                assert!(faces.iter().any(|face| face.polygon.contains(&axis.end)));
+            }
+            for face in faces {
+                assert!(["Top", "Bottom", "Front", "Back", "Left", "Right"].contains(&face.label));
+            }
+        }
+    }
 }

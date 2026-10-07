@@ -196,6 +196,26 @@ fn main() -> Result<()> {
             > 1000,
         "Selection shading did not change the rendered face"
     );
+    let (mut tinted, cube_indices) = confusion::render::scene::demo_cube();
+    for vertex in &mut tinted {
+        vertex.color = [0.8, 0.05, 0.05];
+    }
+    let indices: Vec<u32> = cube_indices.iter().map(|i| *i as u32).collect();
+    renderer.set_mesh(&tinted, &indices);
+    renderer.render(&view, &camera, 0);
+    let tinted_image = read_color(&renderer, &color)?;
+    let center = &tinted_image[(300 * 800 + 400) * 4..][..4];
+    assert!(
+        center[0] > center[1].saturating_mul(2),
+        "Body appearance color did not reach the shader"
+    );
+    assert_eq!(
+        pick(&renderer, [400, 300], 44)?,
+        face,
+        "Appearance changed face picking"
+    );
+    let (original, _) = confusion::render::scene::demo_cube();
+    renderer.set_mesh(&original, &indices);
     for (yaw, elevation, expected) in [
         (0.0, 0.0, 1),
         (std::f64::consts::PI, 0.0, 2),
@@ -236,7 +256,7 @@ fn main() -> Result<()> {
     encoder.set_depth(png::BitDepth::Eight);
     encoder.write_header()?.write_image_data(&image)?;
     println!(
-        "Passed: six face IDs, depth occlusion, background miss, selection shading, color encoding, revision stamps and resize. Saved {path}"
+        "Passed: six face IDs, depth occlusion, background miss, selection shading, appearance colors, color encoding, revision stamps and resize. Saved {path}"
     );
     Ok(())
 }

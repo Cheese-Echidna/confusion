@@ -15,7 +15,7 @@ impl Edge {
         std::mem::swap(&mut self.start, &mut self.end);
         self.sweep = -self.sweep;
     }
-    fn samples(&self) -> Vec<[f64; 2]> {
+    pub fn samples(&self) -> Vec<[f64; 2]> {
         if self.sweep == 0. {
             return vec![self.start, self.end];
         }
@@ -109,6 +109,25 @@ fn contains(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
     }
     inside
 }
+/// Pick the bounded region under a sketch-plane point, excluding its holes.
+pub fn at(d: &Design, xy: &[[f64; 2]], point: [f64; 2]) -> Result<Option<Region>, String> {
+    Ok(regions(d, xy)?.into_iter().find(|region| {
+        let polygons: Vec<Vec<_>> = region
+            .wires
+            .iter()
+            .map(|wire| {
+                let mut polygon: Vec<_> = wire.iter().flat_map(Edge::samples).collect();
+                if let Some(first) = polygon.first().copied() {
+                    polygon.push(first);
+                }
+                polygon
+            })
+            .collect();
+        polygons.first().is_some_and(|outer| contains(outer, point))
+            && !polygons.iter().skip(1).any(|hole| contains(hole, point))
+    }))
+}
+
 /// Reject ambiguous/open/intersecting contours rather than silently changing the region.
 pub fn regions(d: &Design, xy: &[[f64; 2]]) -> Result<Vec<Region>, String> {
     d.validate()?;
@@ -342,4 +361,31 @@ pub fn extrude(region: &Region, depth: f64) -> Result<crate::kernel::bridge::ffi
         })
         .collect();
     ffi::extrude_region(&edges, depth).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod picking_tests {
+    use super::*;
+    #[test]
+    fn picks_nested_regions_and_rejects_empty_space() {
+        let mut d = Design::default();
+        let outer = crate::sketch::edit::circle(&mut d, [0., 0.], [0.03, 0.], None).unwrap();
+        let inner = crate::sketch::edit::circle(&mut d, [0., 0.], [0.01, 0.], None).unwrap();
+        let xy: Vec<_> = d.points.iter().map(|p| p.xy).collect();
+        assert!(
+            at(&d, &xy, [0.02, 0.])
+                .unwrap()
+                .unwrap()
+                .boundary
+                .contains(&outer)
+        );
+        assert!(
+            at(&d, &xy, [0., 0.])
+                .unwrap()
+                .unwrap()
+                .boundary
+                .contains(&inner)
+        );
+        assert!(at(&d, &xy, [0.05, 0.]).unwrap().is_none());
+    }
 }

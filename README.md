@@ -1,7 +1,7 @@
 This is confusion; a fully parametric constraint-based 3D modeling software built on GPUI.rs.
 It is heavily inspired by Autodesk Fusion.
 It has two main modes sketch mode and model mode files are saved with the .con extension in a parametric fashion and do not contain edit history but are still fully parametric.
-Export exists to step and stl files.
+Printing export supports binary STL and 3MF. STEP export remains unimplemented.
 The user interface is heavily inspired by Fusion and where applicable also the Zed IDE.
 There are configurable context-depended keyboard shortcuts. The default for those shortcuts is based on fusion.
 All settings for the application are in a single JSON file.
@@ -28,7 +28,7 @@ On other systems, install OCCT and GPUI's native prerequisites, set
 The GPUI shell includes open-design tabs, a Solid/Sketch/Drawing workspace dropdown,
 pinnable contextual icon ribbons, a floating document tree, a camera cube, view controls
 and a construction timeline with a draggable marker.
-Feature menus include future tools marked **Not implemented**.
+Feature menus include future tools marked **Not implemented**. All Solid/Create tools are available; see [Solid/Create workflows and current limits](docs/solid-create.md).
 
 Choose **Create sketch**, then use **R**, **L**, or **C** to draw geometry. Use **D**
 to add driving dimensions, constraint tools to define relationships, and **I** to
@@ -67,3 +67,5 @@ nix-shell --run 'cargo test --features solver,kernel'
 
 The desktop enables the numerical solver and native OCCT bridge; neither is
 required for headless document validation or `.con` persistence.
+
+See [import and export](docs/import-export.md) for printing exports and the limited editable Fusion transfer workflow. Direct native Fusion archive decoding is not implemented.

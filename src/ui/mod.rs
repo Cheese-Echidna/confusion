@@ -29,3 +29,7 @@ pub mod assets;
 
 pub mod sketch_canvas;
 pub mod view_cube;
+
+pub mod frame_rate;
+
+pub mod extrude_gizmo;

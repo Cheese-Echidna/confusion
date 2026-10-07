@@ -2,7 +2,39 @@
 // invocation.
 #include "confusion/src/kernel/bridge.rs.h"
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepFeat_SplitShape.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <TopExp.hxx>
+#include <HLRBRep_Algo.hxx>
+#include <HLRBRep_HLRToShape.hxx>
+#include <HLRAlgo_Projector.hxx>
+#include <BRepLib.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
+#include <TopTools_HSequenceOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRepOffsetAPI_MakePipe.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom2d_Line.hxx>
+#include <BRepLib.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -31,6 +63,7 @@
 #include <gp_Vec.hxx>
 #include <stdexcept>
 #include <vector>
+#include "inspect.hpp"
 namespace confusion {
 constexpr double tau = 6.2831853071795864769;
 static void check_depth(double depth) {
@@ -63,9 +96,11 @@ struct Output {
   TopoDS_Shape shape;
   std::vector<Cap> caps;
 };
+#include "modify.inc"
 static Mesh mesh_shape(const TopoDS_Shape &shape,
                        const std::vector<Output> &outputs = {},
-                       const std::vector<bool> &consumed = {}) {
+                       const std::vector<bool> &consumed = {},
+                       const std::vector<std::pair<size_t, TopoDS_Shape>> &pieces = {}) {
   if (!BRepCheck_Analyzer(shape).IsValid())
     throw std::runtime_error("Invalid final model");
   GProp_GProps properties;
@@ -73,7 +108,8 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
   Mesh result;
   result.volume = properties.Mass() * 1e-9;
   result.faces = 0;
-  if (!std::isfinite(result.volume) || result.volume <= 0)
+  result.inspection = inspect_shape(shape);
+  if (!std::isfinite(result.volume) || result.volume < 0)
     throw std::runtime_error("Model has no solid volume");
   BRepMesh_IncrementalMesh mesher(shape, 0.1, false, 0.3, true);
   if (!mesher.IsDone())
@@ -85,6 +121,12 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
     if (triangles.IsNull())
       throw std::runtime_error("Missing face triangulation");
     ++result.faces;
+    for (size_t body = 0; body < outputs.size(); ++body)
+      if (!consumed[body] && has_face(outputs[body].shape, face))
+        result.bodies.push_back(BodyFace{result.faces, static_cast<uint32_t>(body), 0});
+    for (const auto &piece : pieces)
+      if (has_face(piece.second, face))
+        result.bodies.push_back(BodyFace{result.faces, static_cast<uint32_t>(piece.first), 1});
     for (size_t support = 0; support < outputs.size(); ++support) {
       if (consumed[support])
         continue;
@@ -247,14 +289,17 @@ static std::vector<Cap> follow_caps(Boolean &operation,
   }
   return caps;
 }
-Mesh evaluate_model(rust::Slice<const ProfileEdge> edges,
+#include "src/kernel/native/solid_create.inc"
+Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges,
                     rust::Slice<const ModelStep> steps,
-                    rust::Slice<const FaceRequest> planes) {
+                    rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits, rust::Slice<const CreateStep> creates) {
   try {
-    if (steps.size() == 0 || steps.size() > 64)
+    if (steps.size() + creates.size() == 0 || steps.size() > 64 || creates.size() > 64)
       throw std::runtime_error("Invalid model feature count");
     std::vector<Output> outputs;
     std::vector<bool> consumed;
+    std::vector<std::pair<size_t, TopoDS_Shape>> pieces;
+    std::vector<gp_Trsf> frames;
     for (size_t index = 0; index < steps.size(); ++index) {
       const auto &step = steps[index];
       try {
@@ -262,7 +307,7 @@ Mesh evaluate_model(rust::Slice<const ProfileEdge> edges,
         if (step.edge_count == 0 || step.edge_start > edges.size() ||
             step.edge_count > edges.size() - step.edge_start)
           throw std::runtime_error("Invalid profile range");
-        if (step.operation > 2)
+        if (step.operation > 3)
           throw std::runtime_error("Unknown extrusion operation");
         auto transform = attachment(step, outputs);
         auto local = profile_face(rust::Slice<const ProfileEdge>(
@@ -272,7 +317,7 @@ Mesh evaluate_model(rust::Slice<const ProfileEdge> edges,
           throw std::runtime_error("Could not place sketch plane");
         auto face = TopoDS::Face(place.Shape());
         gp_Vec direction(0, 0,
-                         (step.operation == 2 ? -1 : 1) * step.depth * 1000);
+                         (step.operation >= 2 ? -1 : 1) * step.depth * 1000);
         direction.Transform(transform);
         BRepPrimAPI_MakePrism prism(face, direction);
         if (!prism.IsDone())
@@ -313,6 +358,13 @@ Mesh evaluate_model(rust::Slice<const ProfileEdge> edges,
             output.shape = op.Shape();
             output.caps = follow_caps(op, caps, output.shape);
           } else {
+            if (step.operation == 3) {
+              BRepAlgoAPI_Common common(outputs[step.target].shape, output.shape);
+              common.Build();
+              if (!common.IsDone() || common.HasErrors()) throw std::runtime_error("Could not create the cut body");
+              check_solid(common.Shape());
+              pieces.emplace_back(index, common.Shape());
+            }
             BRepAlgoAPI_Cut op(outputs[step.target].shape, output.shape);
             op.Build();
             if (!op.IsDone() || op.HasErrors())
@@ -336,28 +388,60 @@ Mesh evaluate_model(rust::Slice<const ProfileEdge> edges,
                                  e.what());
       }
     }
+    append_creates(edges, creates, outputs, consumed);
     for (size_t i = 0; i < planes.size(); ++i) {
       ModelStep plane{};
       plane.support = planes[i].support;
       plane.producer = planes[i].producer;
       plane.role = planes[i].role;
       try {
-        attachment(plane, outputs);
+        frames.push_back(attachment(plane, outputs));
       } catch (const std::exception &e) {
         throw std::runtime_error("Sketch support " + std::to_string(i + 1) +
                                  ": " + e.what());
       }
     }
+    apply_edits(outputs, consumed, edits);
     TopoDS_Compound combined;
     BRep_Builder builder;
     builder.MakeCompound(combined);
     for (size_t i = 0; i < outputs.size(); ++i)
       if (!consumed[i])
         builder.Add(combined, outputs[i].shape);
-    return mesh_shape(combined, outputs, consumed);
+    for (const auto &piece : pieces) builder.Add(combined, piece.second);
+    auto result = mesh_shape(combined, outputs, consumed, pieces);
+    std::vector<TopoDS_Shape> inspection_bodies;
+    for (size_t i = 0; i < outputs.size(); ++i)
+      if (!consumed[i]) inspection_bodies.push_back(outputs[i].shape);
+    for (const auto &piece : pieces) inspection_bodies.push_back(piece.second);
+    inspect_interference(inspection_bodies, result.inspection);
+
+    for (const auto &frame : frames) {
+      auto o = frame.TranslationPart();
+      auto x = gp_Vec(1,0,0).Transformed(frame);
+      auto y = gp_Vec(0,1,0).Transformed(frame);
+      auto n = gp_Vec(0,0,1).Transformed(frame);
+      result.planes.push_back(PlaneFrame{o.X()*0.001,o.Y()*0.001,o.Z()*0.001,
+        x.X(),x.Y(),x.Z(),y.X(),y.Y(),y.Z(),n.X(),n.Y(),n.Z()});
+    }
+    return result;
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(e.GetMessageString());
   }
+}
+Mesh evaluate_create_model(rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
+                    rust::Slice<const FaceRequest> planes,
+                    rust::Slice<const CreateStep> creates) {
+  return evaluate_complete_model(edges,steps,planes,rust::Slice<const ModifyStep>(),creates);
+}
+Mesh evaluate_modified_model(rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
+                    rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits) {
+  return evaluate_complete_model(edges,steps,planes,edits,rust::Slice<const CreateStep>());
+}
+Mesh evaluate_model(rust::Slice<const ProfileEdge> edges,
+                    rust::Slice<const ModelStep> steps,
+                    rust::Slice<const FaceRequest> planes) {
+  return evaluate_create_model(edges, steps, planes, rust::Slice<const CreateStep>());
 }
 Mesh extrude_region(rust::Slice<const ProfileEdge> edges, double depth) {
   try {

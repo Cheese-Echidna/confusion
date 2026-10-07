@@ -57,13 +57,27 @@ fn resolve(
     let v = parser.sum()?;
     parser.space();
     if parser.offset != parser.source.len()
-        || v.dimension != if p.angular { [0, 1] } else { [1, 0] }
+        || v.dimension
+            != if p.scalar {
+                [0, 0]
+            } else if p.angular {
+                [0, 1]
+            } else {
+                [1, 0]
+            }
         || !v.n.is_finite()
         || v.n.abs() > 1000.
     {
         return Err(format!(
-            "{}: expected a finite length (for example 80 mm)",
-            p.name
+            "{}: expected a finite {}",
+            p.name,
+            if p.scalar {
+                "number"
+            } else if p.angular {
+                "angle (for example 90 deg)"
+            } else {
+                "length (for example 80 mm)"
+            }
         ));
     }
     active.remove(&id);
@@ -312,17 +326,15 @@ impl Parser<'_> {
             .id;
         Ok(Value {
             n: resolve(id, self.design, self.active, self.cache)?,
-            dimension: if self
-                .design
-                .parameters
-                .iter()
-                .find(|p| p.id == id)
-                .unwrap()
-                .angular
-            {
-                [0, 1]
-            } else {
-                [1, 0]
+            dimension: {
+                let p = self.design.parameters.iter().find(|p| p.id == id).unwrap();
+                if p.scalar {
+                    [0, 0]
+                } else if p.angular {
+                    [0, 1]
+                } else {
+                    [1, 0]
+                }
             },
         })
     }

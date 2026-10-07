@@ -1,0 +1,110 @@
+{
+  "format": "confusion-fusion-transfer",
+  "version": 1,
+  "design": {
+    "points": [
+      {
+        "id": "ec8fca9c-f780-452d-8aff-85c19c0efe35",
+        "xy": [
+          0.02,
+          0.03
+        ]
+      },
+      {
+        "id": "4ba88479-d959-433c-b9d1-3b5cf396bb36",
+        "xy": [
+          0.03,
+          0.03
+        ]
+      }
+    ],
+    "lines": [],
+    "circles": [
+      {
+        "id": "ba302b54-21f7-4413-9471-b5bbc6605a56",
+        "center": "ec8fca9c-f780-452d-8aff-85c19c0efe35",
+        "rim": "4ba88479-d959-433c-b9d1-3b5cf396bb36",
+        "end": null
+      }
+    ],
+    "ellipses": [],
+    "splines": [],
+    "construction_geometry": [],
+    "dimension_positions": {
+      "83c1adb6-d47d-4b0c-9b08-31da3ad459b5": [
+        0.04,
+        0.05
+      ]
+    },
+    "driven_dimensions": [],
+    "constraints": [
+      {
+        "id": "83c1adb6-d47d-4b0c-9b08-31da3ad459b5",
+        "kind": {
+          "type": "radius",
+          "circle": "ba302b54-21f7-4413-9471-b5bbc6605a56",
+          "parameter": "8f95a2dd-0e2a-486d-b9a9-a3425d35e85e"
+        }
+      }
+    ],
+    "active_sketch": "eae9da05-0a8d-4a29-9511-92d6f45292a9",
+    "active_plane": {
+      "type": "xy"
+    },
+    "sketches": [],
+    "features": [
+      {
+        "id": "af199c7d-8cc4-4bf3-b740-94ac1b283392",
+        "name": "Extrude",
+        "sketch": "eae9da05-0a8d-4a29-9511-92d6f45292a9",
+        "boundary": [
+          "ba302b54-21f7-4413-9471-b5bbc6605a56"
+        ],
+        "depth": "cff8b4d3-b39e-4b4e-b965-17fba39bf40a",
+        "operation": "new_body",
+        "target": null
+      }
+    ],
+    "parameters": [
+      {
+        "id": "0a5affd7-8d2d-4422-ae63-2143981a45df",
+        "name": "width",
+        "expression": "20 mm",
+        "scalar": false,
+        "angular": false
+      },
+      {
+        "id": "8f95a2dd-0e2a-486d-b9a9-a3425d35e85e",
+        "name": "radius",
+        "expression": "width / 2",
+        "scalar": false,
+        "angular": false
+      },
+      {
+        "id": "cff8b4d3-b39e-4b4e-b965-17fba39bf40a",
+        "name": "depth",
+        "expression": "width / 4",
+        "scalar": false,
+        "angular": false
+      }
+    ],
+    "extrusion": null,
+    "construction": [
+      {
+        "id": "eae9da05-0a8d-4a29-9511-92d6f45292a9",
+        "name": "Circle",
+        "kind": {
+          "type": "sketch"
+        }
+      },
+      {
+        "id": "af199c7d-8cc4-4bf3-b740-94ac1b283392",
+        "name": "Extrude",
+        "kind": {
+          "type": "extrude",
+          "sketch": "eae9da05-0a8d-4a29-9511-92d6f45292a9"
+        }
+      }
+    ]
+  }
+}

@@ -10,6 +10,7 @@ pub struct DemoVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub face: u32,
+    pub color: [f32; 3],
 }
 
 pub fn face_name(id: u32) -> &'static str {
@@ -75,6 +76,7 @@ pub fn demo_cube() -> (Vec<DemoVertex>, Vec<u16>) {
             position: position.map(|value| value * 0.75),
             normal,
             face: index as u32 + 1,
+            color: [0.227, 0.376, 0.314],
         }));
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }

@@ -100,7 +100,7 @@ mod implementation {
                     buffers: &[wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<DemoVertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Float32x3],
                     }],
                     compilation_options: Default::default(),
                 },
@@ -256,6 +256,9 @@ mod implementation {
             }
         }
 
+        pub fn set_grid_frame(&mut self, frame: crate::sketch::workplane::Workplane) {
+            self.grid.set_frame(&self.queue, frame);
+        }
         pub fn set_grid(&mut self, visible: bool, axes: bool) {
             self.show_axes = axes;
             self.show_grid = visible;

@@ -14,6 +14,8 @@ mod implementation {
         pipeline: wgpu::RenderPipeline,
         vertices: wgpu::Buffer,
         count: u32,
+        local_vertices: Vec<Vertex>,
+        frame: crate::sketch::workplane::Workplane,
     }
     impl GridRenderer {
         pub fn new(
@@ -118,13 +120,40 @@ mod implementation {
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("XY grid lines"),
                 contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
             Self {
                 pipeline,
                 vertices: buffer,
                 count: vertices.len() as u32,
+                local_vertices: vertices,
+                frame: Default::default(),
             }
+        }
+        pub fn set_frame(
+            &mut self,
+            queue: &wgpu::Queue,
+            frame: crate::sketch::workplane::Workplane,
+        ) {
+            if self.frame == frame {
+                return;
+            }
+            let vertices: Vec<_> = self
+                .local_vertices
+                .iter()
+                .map(|v| {
+                    let position = frame.origin.coords * 25.
+                        + frame.x * v.position[0] as f64
+                        + frame.y * v.position[1] as f64
+                        + frame.normal * v.position[2] as f64;
+                    Vertex {
+                        position: [position.x as f32, position.y as f32, position.z as f32],
+                        color: v.color,
+                    }
+                })
+                .collect();
+            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
+            self.frame = frame;
         }
         pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, axes: bool) {
             pass.set_pipeline(&self.pipeline);

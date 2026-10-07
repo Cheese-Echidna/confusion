@@ -1,0 +1,154 @@
+[
+  {
+    "design": "/tmp/confusion-performance/pockets-0.con",
+    "backtrace": "0",
+    "triangles": 12,
+    "features": 1,
+    "error": null,
+    "idle": {
+      "fps": 62.341965735223766,
+      "median_ms": 16.612284000000002,
+      "p95_ms": 27.029949000000002,
+      "frames": 250
+    },
+    "orbit": {
+      "fps": 62.39373659137146,
+      "median_ms": 16.730996,
+      "p95_ms": 27.105729,
+      "frames": 249
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-1.con",
+    "backtrace": "0",
+    "triangles": 28,
+    "features": 2,
+    "error": null,
+    "idle": {
+      "fps": 67.04368001346673,
+      "median_ms": 16.459947999999997,
+      "p95_ms": 26.723626,
+      "frames": 268
+    },
+    "orbit": {
+      "fps": 65.25184770394551,
+      "median_ms": 16.528514,
+      "p95_ms": 27.049688999999997,
+      "frames": 261
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-8.con",
+    "backtrace": "0",
+    "triangles": 140,
+    "features": 9,
+    "error": null,
+    "idle": {
+      "fps": 59.984471034412636,
+      "median_ms": 16.682235,
+      "p95_ms": 26.517314,
+      "frames": 239
+    },
+    "orbit": {
+      "fps": 60.016120855202765,
+      "median_ms": 16.5996545,
+      "p95_ms": 27.166240000000002,
+      "frames": 240
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-24.con",
+    "backtrace": "0",
+    "triangles": 396,
+    "features": 25,
+    "error": null,
+    "idle": {
+      "fps": 60.00331150775797,
+      "median_ms": 16.6645195,
+      "p95_ms": 27.136879,
+      "frames": 240
+    },
+    "orbit": {
+      "fps": 60.022618608477664,
+      "median_ms": 16.664005000000003,
+      "p95_ms": 27.19589,
+      "frames": 240
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-0.con",
+    "backtrace": "1",
+    "triangles": 12,
+    "features": 1,
+    "error": null,
+    "idle": {
+      "fps": 50.24361955019241,
+      "median_ms": 19.734848999999997,
+      "p95_ms": 21.922127,
+      "frames": 201
+    },
+    "orbit": {
+      "fps": 49.336150586005495,
+      "median_ms": 20.0035965,
+      "p95_ms": 22.852874,
+      "frames": 198
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-1.con",
+    "backtrace": "1",
+    "triangles": 28,
+    "features": 2,
+    "error": null,
+    "idle": {
+      "fps": 49.37819552308244,
+      "median_ms": 19.974222,
+      "p95_ms": 23.045006,
+      "frames": 197
+    },
+    "orbit": {
+      "fps": 49.78369471226847,
+      "median_ms": 19.936270999999998,
+      "p95_ms": 21.934466999999998,
+      "frames": 199
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-8.con",
+    "backtrace": "1",
+    "triangles": 140,
+    "features": 9,
+    "error": null,
+    "idle": {
+      "fps": 33.74172801292726,
+      "median_ms": 29.020685,
+      "p95_ms": 33.478291,
+      "frames": 135
+    },
+    "orbit": {
+      "fps": 33.38578070892818,
+      "median_ms": 29.2903315,
+      "p95_ms": 35.827869,
+      "frames": 134
+    }
+  },
+  {
+    "design": "/tmp/confusion-performance/pockets-24.con",
+    "backtrace": "1",
+    "triangles": 396,
+    "features": 25,
+    "error": null,
+    "idle": {
+      "fps": 20.188898128209342,
+      "median_ms": 48.450751,
+      "p95_ms": 58.438250999999994,
+      "frames": 81
+    },
+    "orbit": {
+      "fps": 19.981120174231133,
+      "median_ms": 48.8455395,
+      "p95_ms": 61.841229,
+      "frames": 80
+    }
+  }
+]

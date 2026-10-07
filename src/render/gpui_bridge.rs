@@ -35,6 +35,9 @@ mod implementation {
             }
         }
 
+        pub fn set_grid_frame(&mut self, frame: crate::sketch::workplane::Workplane) {
+            self.renderer.set_grid_frame(frame);
+        }
         pub fn set_grid(&mut self, visible: bool, axes: bool) {
             self.renderer.set_grid(visible, axes);
         }

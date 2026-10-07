@@ -44,6 +44,12 @@ mod implementation {
     }
 
     impl TextInput {
+        pub fn set_content(&mut self, text: String, cx: &mut Context<Self>) {
+            self.content = text.into();
+            self.selected_range = self.content.len()..self.content.len();
+            self.marked_range = None;
+            cx.notify();
+        }
         pub fn with_placeholder(mut self, placeholder: &str) -> Self {
             self.placeholder = placeholder.to_owned().into();
             self

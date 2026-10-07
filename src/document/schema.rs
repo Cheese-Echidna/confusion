@@ -19,6 +19,8 @@ pub struct Line {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Parameter {
     #[serde(default)]
+    pub scalar: bool,
+    #[serde(default)]
     pub angular: bool,
     pub id: Uuid,
     pub name: String,
@@ -181,6 +183,8 @@ pub struct Spline {
 pub enum ConstructionKind {
     Sketch,
     Extrude { sketch: Uuid },
+    Create,
+    Modify,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,6 +196,14 @@ pub struct ConstructionFeature {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Design {
+    #[serde(default)]
+    pub create_features: Vec<crate::model::solid_create::CreateFeature>,
+    #[serde(default)]
+    pub solid_edits: Vec<crate::model::modify::SolidEdit>,
+    #[serde(default)]
+    pub body_styles: Vec<crate::model::modify::BodyStyle>,
+    #[serde(default)]
+    pub materials: Vec<crate::model::modify::Material>,
     /// The active sketch uses the legacy geometry fields; inactive sketches are stored once here.
     #[serde(default)]
     pub sketches: Vec<super::model::SketchDefinition>,
@@ -275,8 +287,31 @@ impl Design {
                 });
             }
         }
-        let ids: std::collections::HashSet<_> =
-            self.solid_features().iter().map(|f| f.id).collect();
+        for f in &self.create_features {
+            if !self.construction.iter().any(|c| c.id == f.id) {
+                self.construction.push(ConstructionFeature {
+                    id: f.id,
+                    name: f.name.clone(),
+                    kind: ConstructionKind::Create,
+                });
+            }
+        }
+        for edit in &self.solid_edits {
+            if !self.construction.iter().any(|c| c.id == edit.id) {
+                self.construction.push(ConstructionFeature {
+                    id: edit.id,
+                    name: edit.kind.label().into(),
+                    kind: ConstructionKind::Modify,
+                });
+            }
+        }
+        let ids: std::collections::HashSet<_> = self
+            .solid_features()
+            .iter()
+            .map(|f| f.id)
+            .chain(self.create_features.iter().map(|f| f.id))
+            .chain(self.solid_edits.iter().map(|f| f.id))
+            .collect();
         self.construction
             .retain(|f| matches!(f.kind, ConstructionKind::Sketch) || ids.contains(&f.id));
     }
@@ -303,6 +338,8 @@ impl Design {
             result.activate_sketch(sketch)?;
         }
         result.features.retain(|f| kept.contains(&f.id));
+        result.create_features.retain(|f| kept.contains(&f.id));
+        result.solid_edits.retain(|f| kept.contains(&f.id));
         if result
             .extrusion
             .as_ref()
@@ -311,6 +348,14 @@ impl Design {
             result.extrusion = None;
         }
         result.sketches.retain(|s| kept.contains(&s.id));
+        let bodies: std::collections::HashSet<_> = result
+            .solid_features()
+            .iter()
+            .map(|f| f.id)
+            .chain(result.create_features.iter().map(|f| f.id))
+            .collect();
+        result.body_styles.retain(|s| bodies.contains(&s.body));
+
         result.construction.truncate(index + 1);
         Ok(result)
     }
@@ -322,6 +367,7 @@ impl Design {
         }
         let id = Uuid::new_v4();
         self.parameters.push(Parameter {
+            scalar: false,
             angular: false,
             id,
             name: name.into(),
@@ -427,6 +473,16 @@ impl Design {
                     }
                     seen_sketches.insert(f.id);
                 }
+                ConstructionKind::Modify => {
+                    if !self.solid_edits.iter().any(|e| e.id == f.id) {
+                        return Err("Missing Modify definition".into());
+                    }
+                }
+                ConstructionKind::Create => {
+                    if !self.create_features.iter().any(|e| e.id == f.id) {
+                        return Err("Missing Create definition".into());
+                    }
+                }
                 ConstructionKind::Extrude { sketch } => {
                     if !seen_sketches.contains(&sketch)
                         || !solid.iter().any(|e| e.id == f.id && e.sketch == sketch)
@@ -518,7 +574,8 @@ impl Design {
         }
         let mut names = HashSet::new();
         for p in &self.parameters {
-            if p.name.is_empty()
+            if (p.scalar && p.angular)
+                || p.name.is_empty()
                 || !p
                     .name
                     .chars()
@@ -638,12 +695,13 @@ impl Design {
         for c in &self.constraints {
             if let Some(id) = c.kind.parameter() {
                 let p = self.parameters.iter().find(|p| p.id == id).unwrap();
-                if p.angular != matches!(c.kind, ConstraintKind::Angle { .. }) {
+                if p.scalar || p.angular != matches!(c.kind, ConstraintKind::Angle { .. }) {
                     return Err("Dimension parameter has incompatible units".into());
                 }
             }
         }
         self.validate_model()?;
+        self.validate_create_features()?;
         Ok(())
     }
 }

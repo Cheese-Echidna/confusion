@@ -1,0 +1,106 @@
+Direct desktop call graph, 24 pockets, backtraces enabled
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 483  of event 'cpu-clock:u'
+# Event count (approx.): 4878787830
+#
+# Children      Self  Symbol
+# ........  ........  ......................................................................................................................................................................................................
+#
+    90.27%     0.00%  [.] <gpui::text_system::TextSystem>::resolve_font
+            |
+             --89.23%--<gpui::text_system::TextSystem>::font_id
+                       |
+                        --89.03%--anyhow::__private::format_err
+                                  |
+                                   --88.61%--<anyhow::Error>::msg::<alloc::string::String>
+                                             |
+                                              --88.41%--<std::backtrace::Backtrace>::capture
+                                                        |
+                                                         --88.20%--<std::backtrace::Backtrace>::create
+                                                                   _Unwind_Backtrace
+                                                                   |
+                                                                   |--38.51%--uw_frame_state_for
+                                                                   |          |
+                                                                   |          |--21.53%--execute_cfa_program_specialized
+                                                                   |          |
+                                                                   |           --10.97%--_Unwind_Find_FDE
+                                                                   |                     |
+                                                                   |                      --3.31%--get_cie_encoding
+                                                                   |
+                                                                   |--32.71%--std::backtrace_rs::backtrace::libunwind::trace::trace_fn
+                                                                   |          <std::backtrace::Backtrace>::create::{closure#0}
+                                                                   |          |
+                                                                   |           --25.88%--_Unwind_FindEnclosingFunction
+                                                                   |                     |
+                                                                   |                      --25.47%--_Unwind_Find_FDE
+                                                                   |                                |
+
+Direct desktop flat profile, 24 pockets, backtraces disabled
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 99  of event 'cpu-clock:u'
+# Event count (approx.): 999999990
+#
+# Overhead  Shared Object                   Symbol
+# ........  ..............................  ................................................................................................................................................................................
+#
+     9.09%  libc.so.6                       [.] __memmove_avx_unaligned_erms
+     5.05%  confusion-instrumented          [.] <gpui::scene::Scene>::insert_primitive::<gpui::scene::Path<gpui::geometry::ScaledPixels>>
+     4.04%  confusion-instrumented          [.] <gpui::bounds_tree::BoundsTree<gpui::geometry::ScaledPixels>>::find_max_ordering
+     4.04%  confusion-instrumented          [.] taffy::compute::flexbox::compute_flexbox_layout::<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}
+     3.03%  confusion-instrumented          [.] <gpui::bounds_tree::BoundsTree<gpui::geometry::ScaledPixels>>::insert
+     3.03%  libc.so.6                       [.] __memmove_avx_unaligned
+     3.03%  libc.so.6                       [.] _int_malloc
+     3.03%  libc.so.6                       [.] cfree@GLIBC_2.2.5
+     2.02%  confusion-instrumented          [.] <alloc::vec::Vec<alloc::boxed::Box<dyn for<'a, 'b, 'c, 'd> core::ops::function::Fn<(&'a gpui::interactive::ScrollWheelEvent, gpui::window::DispatchPhase, &'b gpui::window::
+     2.02%  confusion-instrumented          [.] <gpui::style::Style as core::default::Default>::default
+     2.02%  confusion-instrumented          [.] <gpui::style::Style as gpui::taffy::ToTaffy<taffy::style::Style>>::to_taffy
+     2.02%  confusion-instrumented          [.] <gpui::style::Style as gpui_refineable::Refineable>::refine
+     2.02%  confusion-instrumented          [.] <gpui::window::Window>::with_optional_element_state::<gpui::elements::div::InteractiveElementState, (), <gpui::elements::div::Interactivity>::paint<<gpui::elements::div::Di
+     2.02%  confusion-instrumented          [.] <taffy::tree::taffy_tree::TaffyTree<gpui::taffy::NodeContext>>::new_leaf
+     2.02%  confusion-instrumented          [.] __rustc::__rust_no_alloc_shim_is_unstable_v2
+     2.02%  confusion-instrumented          [.] core::ptr::drop_glue::<<gpui::window::Window>::on_mouse_event<gpui::interactive::MouseUpEvent, <gpui::elements::div::Interactivity>::paint_mouse_listeners::{closure#11}>::{
+     2.02%  confusion-instrumented          [.] taffy::compute::flexbox::calculate_flex_item::<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{
+     2.02%  libc.so.6                       [.] __libc_malloc2
+     2.02%  libc.so.6                       [.] _int_free_create_chunk
+     1.01%  confusion-instrumented          [.] <<confusion::ui::sketch_canvas::implementation::SketchCanvas>::element::{closure#1} as core::ops::function::FnOnce<(gpui::geometry::Bounds<gpui::geometry::Pixels>, (), &mut
+
+Mixed benchmark CPU samples by library
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu-clock:u'
+# Event count (approx.): 8708541625
+#
+# Overhead  Shared Object
+# ........  ...............................
+#
+    25.33%  libTKBRep.so.7.9.3
+    17.14%  libc.so.6
+    12.23%  libTKTopAlgo.so.7.9.3
+    10.79%  libTKMath.so.7.9.3
+     8.94%  performance_review
+     4.96%  libTKBO.so.7.9.3
+     4.50%  libTKernel.so.7.9.3
+     3.92%  libTKG3d.so.7.9.3
+     3.92%  libnvidia-glcore.so.595.104.02
+     2.71%  libTKGeomBase.so.7.9.3
+     1.73%  libTKGeomAlgo.so.7.9.3
+     1.27%  libTKG2d.so.7.9.3
+     1.04%  libstdc++.so.6.0.36
+     0.69%  libTKMesh.so.7.9.3
+     0.23%  ld-linux-x86-64.so.2
+     0.12%  [vdso]
+     0.12%  libexpat.so.1.12.5
+     0.12%  libm.so.6
+     0.06%  libTKPrim.so.7.9.3
+     0.06%  libTKShHealing.so.7.9.3

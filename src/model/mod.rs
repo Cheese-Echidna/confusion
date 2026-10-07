@@ -15,3 +15,7 @@ pub mod naming;
 pub mod operations;
 pub mod patterns;
 pub mod registry;
+
+pub mod modify;
+
+pub mod solid_create;

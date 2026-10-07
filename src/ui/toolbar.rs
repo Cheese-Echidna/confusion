@@ -18,6 +18,13 @@ impl Mode {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    Export(crate::exchange::export::ExportFormat),
+    ImportFusion,
+    SolidCreate(crate::model::solid_create::CreateKind),
+    SolidModify(crate::model::modify::ModifyKind),
+    PhysicalMaterial,
+    Appearance,
+    ManageMaterials,
     Sketch,
     Extrude,
     Parameters,
@@ -48,6 +55,12 @@ pub enum Action {
     Extend,
     Offset,
     Measure,
+    SectionAnalysis,
+    Interference,
+    CenterOfMass,
+    CurvatureAnalysis,
+    DraftAnalysis,
+    ValidateSolid,
     Coincident,
     Parallel,
     Perpendicular,
@@ -102,127 +115,169 @@ const SOLID_0: &[Feature] = &[
         id: "solid-revolve",
         name: "Revolve",
         icon: "PartDesign_Revolution",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Revolve,
+        )),
     },
     Feature {
         id: "solid-sweep",
         name: "Sweep",
         icon: "PartDesign_AdditivePipe",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Sweep,
+        )),
     },
     Feature {
         id: "solid-loft",
         name: "Loft",
         icon: "PartDesign_AdditiveLoft",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Loft,
+        )),
     },
     Feature {
         id: "solid-rib",
         name: "Rib",
         icon: "line_perpendicular",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Rib,
+        )),
     },
     Feature {
         id: "solid-web",
         name: "Web",
         icon: "line_parallel",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Web,
+        )),
     },
     Feature {
         id: "solid-emboss",
         name: "Emboss",
         icon: "text",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Emboss,
+        )),
     },
     Feature {
         id: "solid-hole",
         name: "Hole",
         icon: "PartDesign_Hole",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Hole,
+        )),
     },
     Feature {
         id: "solid-thread",
         name: "Thread",
         icon: "spline_points",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Thread,
+        )),
     },
     Feature {
         id: "solid-box",
         name: "Box",
         icon: "PartDesign_AdditiveBox",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Box,
+        )),
     },
     Feature {
         id: "solid-cylinder",
         name: "Cylinder",
         icon: "PartDesign_AdditiveCylinder",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Cylinder,
+        )),
     },
     Feature {
         id: "solid-sphere",
         name: "Sphere",
         icon: "PartDesign_AdditiveSphere",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Sphere,
+        )),
     },
     Feature {
         id: "solid-torus",
         name: "Torus",
         icon: "PartDesign_AdditiveTorus",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Torus,
+        )),
     },
     Feature {
         id: "solid-coil",
         name: "Coil",
         icon: "PartDesign_AdditiveHelix",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Coil,
+        )),
     },
     Feature {
         id: "solid-pipe",
         name: "Pipe",
         icon: "PartDesign_AdditivePipe",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Pipe,
+        )),
     },
     Feature {
         id: "solid-rectangular-pattern",
         name: "Rectangular pattern",
         icon: "PartDesign_LinearPattern",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::RectangularPattern,
+        )),
     },
     Feature {
         id: "solid-circular-pattern",
         name: "Circular pattern",
         icon: "PartDesign_PolarPattern",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::CircularPattern,
+        )),
     },
     Feature {
         id: "solid-pattern-on-path",
         name: "Pattern on path",
         icon: "spline",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::PatternOnPath,
+        )),
     },
     Feature {
         id: "solid-mirror",
         name: "Mirror",
         icon: "PartDesign_Mirrored",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Mirror,
+        )),
     },
     Feature {
         id: "solid-thicken",
         name: "Thicken",
         icon: "Part_Thickness",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Thicken,
+        )),
     },
     Feature {
         id: "solid-boundary-fill",
         name: "Boundary fill",
         icon: "hatch",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::BoundaryFill,
+        )),
     },
     Feature {
         id: "solid-gear",
         name: "Gear",
         icon: "circle",
-        action: None,
+        action: Some(Action::SolidCreate(
+            crate::model::solid_create::CreateKind::Gear,
+        )),
     },
 ];
 const SOLID_1: &[Feature] = &[
@@ -230,121 +285,147 @@ const SOLID_1: &[Feature] = &[
         id: "solid-press-pull",
         name: "Press pull",
         icon: "Part_Offset",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::PressPull,
+        )),
     },
     Feature {
         id: "solid-fillet",
         name: "Fillet",
         icon: "PartDesign_Fillet",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::Fillet,
+        )),
     },
     Feature {
         id: "solid-chamfer",
         name: "Chamfer",
         icon: "PartDesign_Chamfer",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::Chamfer,
+        )),
     },
     Feature {
         id: "solid-shell",
         name: "Shell",
         icon: "PartDesign_Thickness",
-        action: None,
+        action: Some(Action::SolidModify(crate::model::modify::ModifyKind::Shell)),
     },
     Feature {
         id: "solid-draft",
         name: "Draft",
         icon: "draft",
-        action: None,
+        action: Some(Action::SolidModify(crate::model::modify::ModifyKind::Draft)),
     },
     Feature {
         id: "solid-scale",
         name: "Scale",
         icon: "scale",
-        action: None,
+        action: Some(Action::SolidModify(crate::model::modify::ModifyKind::Scale)),
     },
     Feature {
         id: "solid-combine",
         name: "Combine",
         icon: "PartDesign_Boolean",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::Combine,
+        )),
     },
     Feature {
         id: "solid-offset-face",
         name: "Offset face",
         icon: "Part_Offset",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::OffsetFace,
+        )),
     },
     Feature {
         id: "solid-replace-face",
         name: "Replace face",
         icon: "Part_Shapebuilder",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::ReplaceFace,
+        )),
     },
     Feature {
         id: "solid-split-body",
         name: "Split body",
         icon: "Part_SliceApart",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::SplitBody,
+        )),
     },
     Feature {
         id: "solid-split-face",
         name: "Split face",
         icon: "Part_Slice",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::SplitFace,
+        )),
     },
     Feature {
         id: "solid-silhouette-split",
         name: "Silhouette split",
         icon: "Part_Section",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::SilhouetteSplit,
+        )),
     },
     Feature {
         id: "solid-move-copy",
         name: "Move / copy",
         icon: "move_copy",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::MoveCopy,
+        )),
     },
     Feature {
         id: "solid-align",
         name: "Align",
         icon: "PartDesign_CoordinateSystem",
-        action: None,
+        action: Some(Action::SolidModify(crate::model::modify::ModifyKind::Align)),
     },
     Feature {
         id: "solid-delete",
         name: "Delete",
         icon: "delete",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::Delete,
+        )),
     },
     Feature {
         id: "solid-remove",
         name: "Remove",
         icon: "remove",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::Remove,
+        )),
     },
     Feature {
         id: "solid-simplify",
         name: "Simplify",
         icon: "Part_Defeaturing",
-        action: None,
+        action: Some(Action::SolidModify(
+            crate::model::modify::ModifyKind::Simplify,
+        )),
     },
     Feature {
         id: "solid-physical-material",
         name: "Physical material",
         icon: "hatch",
-        action: None,
+        action: Some(Action::PhysicalMaterial),
     },
     Feature {
         id: "solid-appearance",
         name: "Appearance",
         icon: "attributes",
-        action: None,
+        action: Some(Action::Appearance),
     },
     Feature {
         id: "solid-manage-materials",
         name: "Manage materials",
         icon: "properties",
-        action: None,
+        action: Some(Action::ManageMaterials),
     },
     Feature {
         id: "solid-change-parameters",
@@ -512,46 +593,52 @@ const SOLID_4: &[Feature] = &[
         id: "solid-measure",
         name: "Measure",
         icon: "measure",
-        action: None,
+        action: Some(Action::Measure),
     },
     Feature {
         id: "solid-section-analysis",
         name: "Section analysis",
         icon: "Part_CrossSections",
-        action: None,
+        action: Some(Action::SectionAnalysis),
     },
     Feature {
         id: "solid-interference",
         name: "Interference",
         icon: "Part_Common",
-        action: None,
+        action: Some(Action::Interference),
     },
     Feature {
         id: "solid-center-of-mass",
         name: "Center of mass",
         icon: "snap_center",
-        action: None,
+        action: Some(Action::CenterOfMass),
     },
     Feature {
         id: "solid-curvature-analysis",
         name: "Curvature analysis",
         icon: "spline",
-        action: None,
+        action: Some(Action::CurvatureAnalysis),
     },
     Feature {
         id: "solid-draft-analysis",
         name: "Draft analysis",
         icon: "draft",
-        action: None,
+        action: Some(Action::DraftAnalysis),
     },
     Feature {
         id: "solid-validate-solid",
         name: "Validate solid",
         icon: "Part_CheckGeometry",
-        action: None,
+        action: Some(Action::ValidateSolid),
     },
 ];
 const SOLID_5: &[Feature] = &[
+    Feature {
+        id: "solid-import-fusion",
+        name: "Import Fusion transfer",
+        icon: "import",
+        action: Some(Action::ImportFusion),
+    },
     Feature {
         id: "solid-import-step",
         name: "Import STEP",

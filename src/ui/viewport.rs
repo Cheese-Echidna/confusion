@@ -31,16 +31,19 @@ mod implementation {
     use uuid::Uuid;
     #[derive(Clone, Copy, PartialEq)]
     enum Panel {
-        Document,
         Parameters,
         Extrude,
+        Create,
         Dimension,
         View,
         Measure,
+        Inspect,
         Offset,
         Search,
         Transform,
         Fillet,
+        SolidModify,
+        Materials,
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -77,13 +80,20 @@ mod implementation {
         previous: Point<Pixels>,
     }
 
+    #[derive(Clone, Copy)]
+    enum CloseTarget {
+        Tab(usize),
+        Window,
+    }
     #[derive(Clone)]
     struct DocumentTab {
         design: Design,
+        dirty: bool,
         undo: Vec<Design>,
         redo: Vec<Design>,
         path: String,
         saved_path: Option<PathBuf>,
+        saved_fingerprint: blake3::Hash,
         mode: Mode,
         camera: Camera,
         scale: f64,
@@ -91,11 +101,32 @@ mod implementation {
     }
 
     pub struct WorkspaceView {
+        dirty_cache: Cell<(u64, bool)>,
+        extrude_drag: Option<(Point<Pixels>, f64, [f64; 2])>,
+        create_editor: Option<CreateEditor>,
         gpu: GpuViewport,
+        ui_font_family: SharedString,
+        world_sketches: Vec<(Uuid, Design, crate::sketch::workplane::Workplane)>,
+        body_faces: std::collections::HashMap<u32, (Uuid, u32)>,
+        hidden_sketches: HashSet<Uuid>,
+        hidden_bodies: HashSet<(Uuid, u32)>,
+        align_sketch_pending: bool,
+        frame_rate: crate::ui::frame_rate::FrameRate,
+        native_dialog: Option<(bool, std::sync::mpsc::Receiver<Option<PathBuf>>)>,
+        export_dialog: Option<(
+            crate::exchange::export::ExportFormat,
+            std::sync::mpsc::Receiver<Option<PathBuf>>,
+        )>,
+        export_result: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+        close_choice: usize,
+        close_target: Option<CloseTarget>,
+        close_approved: HashSet<usize>,
+        close_hook_installed: bool,
         camera: Camera,
         view_revision: u64,
         selected: u32,
         face_anchors: Vec<crate::kernel::bridge::ffi::FaceAnchor>,
+        solid_editor: SolidEditor,
         evaluated_features: Vec<Uuid>,
         extrude_operation: ExtrudeOperation,
         extrude_target: Option<Uuid>,
@@ -121,6 +152,7 @@ mod implementation {
         dimension: Entity<TextInput>,
         path: Entity<TextInput>,
         saved_path: Option<PathBuf>,
+        saved_fingerprint: blake3::Hash,
         undo: Vec<Design>,
         redo: Vec<Design>,
         scale: f64,
@@ -139,6 +171,9 @@ mod implementation {
         construction_cursor: Option<Uuid>,
         cube_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
         menu_x: f32,
+        menu_leave_deadline: Option<std::time::Instant>,
+        choosing_sketch_face: bool,
+        sketch_region: Option<crate::sketch::regions::Region>,
         before_construction: bool,
         documents: Vec<DocumentTab>,
         active_document: usize,
@@ -169,23 +204,71 @@ mod implementation {
         editor_input: Option<EntityId>,
         search_index: usize,
         search_query: String,
+        inspection: Option<crate::kernel::bridge::ffi::Inspection>,
+        inspection_action: Action,
+        inspection_preview: bool,
+        section_axis: usize,
+        section_position: f32,
+        section_offset: Entity<TextInput>,
     }
 
     include!("sketch_workflow.rs");
+    include!("solid_create.rs");
+    include!("solid_modify.rs");
+    include!("solid_inspect.rs");
 
     impl WorkspaceView {
         pub fn new(surface: WgpuSurfaceHandle, cx: &mut Context<Self>) -> Self {
+            // Resolve a real installed sans family once. Generic CSS names are not
+            // mapped by the native text backend and repeat costly error creation.
+            let fonts = cx.text_system().all_font_names();
+            let family = [
+                "Segoe UI",
+                "Helvetica Neue",
+                "Helvetica",
+                "Noto Sans",
+                "DejaVu Sans",
+                "Liberation Sans",
+                "Arial",
+            ]
+            .into_iter()
+            .find(|candidate| fonts.iter().any(|name| name == candidate));
+            let ui_font_family = family.map(SharedString::from).unwrap_or_else(|| {
+                let id = cx.text_system().resolve_font(&gpui::font(".SystemUIFont"));
+                cx.text_system()
+                    .get_font_for_id(id)
+                    .expect("resolved system font")
+                    .family
+            });
             let saved_pins = crate::settings::store::toolbar_pins();
             let mut gpu = GpuViewport::new(surface);
             gpu.set_mesh(&[], &[]);
             let keymap = crate::settings::keymap::load();
             let keymap_error = keymap.as_ref().err().cloned();
             Self {
+                dirty_cache: Cell::new((u64::MAX, false)),
+                extrude_drag: None,
+                create_editor: None,
                 gpu,
+                ui_font_family,
+                world_sketches: vec![],
+                body_faces: Default::default(),
+                hidden_sketches: Default::default(),
+                hidden_bodies: Default::default(),
+                align_sketch_pending: false,
+                frame_rate: Default::default(),
+                native_dialog: None,
+                export_dialog: None,
+                export_result: None,
+                close_choice: 2,
+                close_target: None,
+                close_approved: Default::default(),
+                close_hook_installed: false,
                 camera: Camera::default(),
                 view_revision: 0,
                 selected: 0,
                 face_anchors: vec![],
+                solid_editor: SolidEditor::new(cx),
                 evaluated_features: vec![],
                 extrude_operation: ExtrudeOperation::NewBody,
                 extrude_target: None,
@@ -211,6 +294,7 @@ mod implementation {
                 dimension: cx.new(|cx| TextInput::new("40 mm", cx)),
                 path: cx.new(|cx| TextInput::new("Untitled.con", cx)),
                 saved_path: None,
+                saved_fingerprint: crate::document::dirty::fingerprint(&Design::default()),
                 undo: vec![],
                 redo: vec![],
                 scale: 6000.,
@@ -229,13 +313,18 @@ mod implementation {
                 construction_cursor: None,
                 cube_bounds: Rc::new(Cell::new(None)),
                 menu_x: 12.,
+                menu_leave_deadline: None,
+                choosing_sketch_face: false,
+                sketch_region: None,
                 before_construction: false,
                 documents: vec![DocumentTab {
                     design: Design::default(),
+                    dirty: false,
                     undo: vec![],
                     redo: vec![],
                     path: "Untitled.con".into(),
                     saved_path: None,
+                    saved_fingerprint: crate::document::dirty::fingerprint(&Design::default()),
                     mode: Mode::Solid,
                     camera: Camera::default(),
                     scale: 6000.,
@@ -284,6 +373,12 @@ mod implementation {
                 editor_input: None,
                 search_index: 0,
                 search_query: String::new(),
+                inspection: None,
+                inspection_action: Action::Measure,
+                inspection_preview: false,
+                section_axis: 2,
+                section_position: 0.,
+                section_offset: cx.new(|cx| TextInput::new("0 mm", cx)),
             }
         }
 
@@ -291,6 +386,34 @@ mod implementation {
             window.focus(&self.focus);
         }
 
+        fn active_frame(&self) -> crate::sketch::workplane::Workplane {
+            self.world_sketches
+                .iter()
+                .find(|(id, _, _)| Some(*id) == self.design.current_sketch_id())
+                .map_or_else(Default::default, |(_, _, frame)| *frame)
+        }
+        fn sketch_screen(&self, at: [f64; 2]) -> Option<[f64; 2]> {
+            let bounds = self.bounds.get()?;
+            let world = self.active_frame().world(at);
+            self.camera.project(
+                nalgebra::Point3::from(world.coords * 25.),
+                [
+                    f64::from(bounds.size.width) as u32,
+                    f64::from(bounds.size.height) as u32,
+                ],
+            )
+        }
+        fn align_to_sketch(&mut self) {
+            let frame = self.active_frame();
+            self.camera.set_direction(frame.normal, frame.y);
+            self.camera.projection = ProjectionMode::Orthographic;
+            self.camera.target = nalgebra::Point3::from(frame.world(self.center).coords * 25.);
+            let height = self.bounds.get().map_or(575., |b| f64::from(b.size.height));
+            self.camera.distance =
+                height * 25. / (2. * self.scale * (Camera::FIELD_OF_VIEW / 2.).tan());
+            self.align_sketch_pending = false;
+            self.changed_camera();
+        }
         fn changed_camera(&mut self) {
             self.view_revision = self.view_revision.wrapping_add(1);
             self.pending_pick = None;
@@ -351,6 +474,9 @@ mod implementation {
             } else {
                 self.fit_pending = true;
             }
+            if self.sketch {
+                self.align_to_sketch();
+            }
             self.changed_camera();
         }
         fn checkpoint(&mut self) {
@@ -361,18 +487,23 @@ mod implementation {
             self.redo.clear();
         }
         fn rebuild(&mut self, cx: &mut Context<Self>) {
+            self.sketch_region = None;
             self.revision = self.revision.wrapping_add(1);
             self.changed_camera();
             self.selected = 0;
             self.face_anchors.clear();
+            self.body_faces.clear();
             self.evaluated_features.clear();
             self.volume = None;
+            self.inspection = None;
             self.conflicts.clear();
-            self.gpu.set_mesh(&[], &[]);
             self.status = "Solving…".into();
             self.error = None;
             self.design.sync_construction();
-            self.mesh = None;
+            if self.design.solid_features().is_empty() && self.design.create_features.is_empty() {
+                self.mesh = None;
+                self.gpu.set_mesh(&[], &[]);
+            }
             let snapshot = self
                 .construction_cursor
                 .and_then(|id| self.design.through_feature(id).ok())
@@ -394,6 +525,67 @@ mod implementation {
             self.inputs
                 .retain(|(id, _)| self.design.parameters.iter().any(|p| p.id == *id));
             cx.notify();
+        }
+        fn extrusion_preview(&self, cx: &App) -> Option<crate::ui::extrude_gizmo::ExtrudeGizmo> {
+            if self.panel != Some(Panel::Extrude) {
+                return None;
+            }
+            let d = self.display_design();
+            let regions = crate::sketch::regions::regions(
+                &d,
+                &d.points.iter().map(|p| p.xy).collect::<Vec<_>>(),
+            )
+            .ok()?;
+            let region = regions
+                .iter()
+                .find(|r| r.boundary.iter().any(|id| self.selection.contains(id)))
+                .or_else(|| {
+                    self.design
+                        .solid_features()
+                        .iter()
+                        .find(|f| Some(f.id) == self.editing_feature)
+                        .and_then(|f| regions.iter().find(|r| r.boundary == f.boundary))
+                })
+                .or_else(|| (regions.len() == 1).then(|| &regions[0]))?;
+            let curves: Vec<_> = region
+                .boundary
+                .iter()
+                .map(|id| crate::sketch::entities::samples(&d, *id))
+                .collect();
+            let points: Vec<_> = curves.iter().flatten().collect();
+            if points.is_empty() {
+                return None;
+            }
+            let center = [
+                points.iter().map(|p| p[0]).sum::<f64>() / points.len() as f64,
+                points.iter().map(|p| p[1]).sum::<f64>() / points.len() as f64,
+            ];
+            let mut values = self.design.clone();
+            let id = values.parameter(
+                "preview_depth",
+                crate::parameters::expression::dimension_input(&self.depth.read(cx).content, false),
+            );
+            let depth = *crate::parameters::expression::evaluate(&values)
+                .ok()?
+                .get(&id)?;
+            if depth <= 0. {
+                return None;
+            }
+            let sign = if matches!(
+                self.extrude_operation,
+                ExtrudeOperation::Cut | ExtrudeOperation::CutNewBody
+            ) {
+                -1.
+            } else {
+                1.
+            };
+            Some(crate::ui::extrude_gizmo::ExtrudeGizmo {
+                camera: self.camera.clone(),
+                frame: self.active_frame(),
+                curves,
+                center,
+                depth: depth * sign,
+            })
         }
         fn open_extrude(&mut self, cx: &mut Context<Self>) {
             self.editing_feature = self
@@ -433,6 +625,12 @@ mod implementation {
                 self.depth = cx.new(|cx| TextInput::new("5 mm", cx));
             }
             self.panel = Some(Panel::Extrude);
+            let frame = self.active_frame();
+            if self.camera.outward().dot(&frame.normal).abs() > 0.95 {
+                self.camera
+                    .set_direction(frame.normal + frame.x * 0.65 - frame.y * 0.65, frame.y);
+                self.changed_camera();
+            }
         }
         fn create_sketch(&mut self, cx: &mut Context<Self>) {
             let plane = if self.selected != 0 {
@@ -468,6 +666,7 @@ mod implementation {
                     && candidate.features.is_empty())
             {
                 candidate.ensure_sketch();
+                candidate.active_plane = plane;
             } else if let Err(e) = candidate.create_sketch(plane) {
                 self.error = Some(e);
                 cx.notify();
@@ -645,10 +844,12 @@ mod implementation {
         fn stash_document(&mut self, cx: &App) {
             self.documents[self.active_document] = DocumentTab {
                 design: self.design.clone(),
+                dirty: crate::document::dirty::fingerprint(&self.design) != self.saved_fingerprint,
                 undo: self.undo.clone(),
                 redo: self.redo.clone(),
                 path: self.path.read(cx).content.to_string(),
                 saved_path: self.saved_path.clone(),
+                saved_fingerprint: self.saved_fingerprint,
                 mode: self.mode,
                 camera: self.camera.clone(),
                 scale: self.scale,
@@ -656,6 +857,10 @@ mod implementation {
             };
         }
         fn switch_document(&mut self, index: usize, cx: &mut Context<Self>) {
+            self.mesh = None;
+            self.world_sketches.clear();
+            self.body_faces.clear();
+            self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.active_document = index;
             let tab = self.documents[index].clone();
@@ -663,6 +868,7 @@ mod implementation {
             self.undo = tab.undo;
             self.redo = tab.redo;
             self.saved_path = tab.saved_path;
+            self.saved_fingerprint = tab.saved_fingerprint;
             self.path = cx.new(|cx| TextInput::new(&tab.path, cx));
             self.mode = tab.mode;
             self.sketch = self.mode == Mode::Sketch;
@@ -673,16 +879,22 @@ mod implementation {
             self.menu = None;
             self.restore_edit(cx);
         }
-        fn close_document(&mut self, index: usize, cx: &mut Context<Self>) {
+        fn close_document_now(&mut self, index: usize, cx: &mut Context<Self>) {
+            self.mesh = None;
+            self.world_sketches.clear();
+            self.body_faces.clear();
+            self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.documents.remove(index);
             if self.documents.is_empty() {
                 self.documents.push(DocumentTab {
                     design: Design::default(),
+                    dirty: false,
                     undo: vec![],
                     redo: vec![],
                     path: "Untitled.con".into(),
                     saved_path: None,
+                    saved_fingerprint: crate::document::dirty::fingerprint(&Design::default()),
                     mode: Mode::Solid,
                     camera: Camera::default(),
                     scale: 6000.,
@@ -701,6 +913,7 @@ mod implementation {
             self.redo = tab.redo.clone();
             self.path = cx.new(|cx| TextInput::new(&tab.path, cx));
             self.saved_path = tab.saved_path.clone();
+            self.saved_fingerprint = tab.saved_fingerprint;
             self.mode = tab.mode;
             self.camera = tab.camera;
             self.scale = tab.scale;
@@ -711,6 +924,10 @@ mod implementation {
             self.restore_edit(cx);
         }
         fn new_document(&mut self, cx: &mut Context<Self>) {
+            self.mesh = None;
+            self.world_sketches.clear();
+            self.body_faces.clear();
+            self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.documents
                 .push(self.documents[self.active_document].clone());
@@ -730,23 +947,194 @@ mod implementation {
             self.menu = None;
             self.tool = Tool::Select;
             self.saved_path = None;
+            self.saved_fingerprint = crate::document::dirty::fingerprint(&self.design);
+            self.dirty_cache.set((u64::MAX, false));
             self.path = cx.new(|cx| TextInput::new("Untitled.con", cx));
             self.depth = cx.new(|cx| TextInput::new("10 mm", cx));
             self.rebuild(cx);
+        }
+        fn dirty(&self) -> bool {
+            let (revision, dirty) = self.dirty_cache.get();
+            if revision == self.revision {
+                return dirty;
+            }
+            let dirty = crate::document::dirty::fingerprint(&self.design) != self.saved_fingerprint;
+            self.dirty_cache.set((self.revision, dirty));
+            dirty
+        }
+        fn start_file_dialog(&mut self, open: bool, cx: &mut Context<Self>) {
+            if self.native_dialog.is_some() {
+                return;
+            }
+            self.menu = None;
+            self.panel = None;
+            self.error = None;
+            self.native_dialog = Some((
+                open,
+                crate::platform::dialogs::select_file(
+                    open,
+                    PathBuf::from(self.path.read(cx).content.to_string()),
+                ),
+            ));
+            cx.notify();
+        }
+        fn request_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            if self.saved_path.is_none() {
+                self.start_file_dialog(false, cx);
+            } else {
+                self.save(cx);
+                if self.error.is_none() {
+                    self.finish_close(window, cx);
+                }
+            }
+        }
+        fn request_close_document(&mut self, index: usize, cx: &mut Context<Self>) {
+            self.stash_document(cx);
+            if crate::document::dirty::fingerprint(&self.documents[index].design)
+                != self.documents[index].saved_fingerprint
+            {
+                if index != self.active_document {
+                    self.switch_document(index, cx);
+                }
+                self.close_choice = 2;
+                self.close_target = Some(CloseTarget::Tab(index));
+                cx.notify();
+            } else {
+                self.close_document_now(index, cx);
+            }
+        }
+        pub fn request_window_close(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> bool {
+            if self.native_dialog.is_some() {
+                return false;
+            }
+            self.stash_document(cx);
+            if let Some(index) = self
+                .documents
+                .iter()
+                .enumerate()
+                .find(|(index, tab)| {
+                    !self.close_approved.contains(index)
+                        && crate::document::dirty::fingerprint(&tab.design) != tab.saved_fingerprint
+                })
+                .map(|(i, _)| i)
+            {
+                if index != self.active_document {
+                    self.switch_document(index, cx);
+                }
+                self.close_choice = 2;
+                window.focus(&self.focus);
+                self.close_target = Some(CloseTarget::Window);
+                cx.notify();
+                false
+            } else {
+                true
+            }
+        }
+        fn finish_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            match self.close_target.take() {
+                Some(CloseTarget::Tab(index)) => self.close_document_now(index, cx),
+                Some(CloseTarget::Window) if self.request_window_close(window, cx) => {
+                    window.remove_window()
+                }
+                _ => {}
+            }
+        }
+        fn close_confirmation(&self, cx: &mut Context<Self>) -> Option<Div> {
+            if self.close_target.is_none() && self.native_dialog.is_none() {
+                return None;
+            }
+            let mut content = div()
+                .w(px(380.))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .bg(rgb(t::PANEL))
+                .border_1()
+                .border_color(rgb(t::BORDER))
+                .rounded_md();
+            if self.native_dialog.is_some() {
+                content = content.child("Choose a file in the system dialog");
+            } else {
+                content = content
+                    .child(format!("Save changes to {}?", self.document_name(cx)))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(t::MUTED))
+                            .child("Your changes will be lost if you discard them."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                text_button("cancel-close", "Cancel", "Keep editing · Escape")
+                                    .when(self.close_choice == 0, |el| el.bg(rgb(t::SELECTED)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_target = None;
+                                        this.close_approved.clear();
+                                        window.focus(&this.focus);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                text_button("discard-close", "Discard", "Close without saving")
+                                    .when(self.close_choice == 1, |el| el.bg(rgb(t::SELECTED)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if matches!(this.close_target, Some(CloseTarget::Window)) {
+                                            this.close_approved.insert(this.active_document);
+                                        }
+                                        this.finish_close(window, cx);
+                                    })),
+                            )
+                            .child(
+                                text_button("save-close", "Save", "Save and close · Enter")
+                                    .when(self.close_choice == 2, |el| el.bg(rgb(t::SELECTED)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request_save(window, cx)
+                                    })),
+                            ),
+                    );
+                if let Some(error) = &self.error {
+                    content = content.child(div().text_color(rgb(t::ERROR)).child(error.clone()));
+                }
+            }
+            Some(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .bg(rgba(0x282828b0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .child(content),
+            )
         }
         fn save(&mut self, cx: &mut Context<Self>) {
             let mut path = PathBuf::from(self.path.read(cx).content.to_string());
             if path.extension().and_then(|x| x.to_str()) != Some("con") {
                 path.set_extension("con");
             }
-            if path.exists() && self.saved_path.as_ref() != Some(&path) {
-                self.error =
-                    Some("That file exists. Open it first or choose a new filename.".into());
-                return;
-            }
             match crate::persistence::container::save(&path, &self.design) {
                 Ok(()) => {
                     self.saved_path = Some(path.clone());
+                    self.saved_fingerprint = crate::document::dirty::fingerprint(&self.design);
+                    self.dirty_cache.set((u64::MAX, false));
                     self.status = format!("Saved {}", path.display());
                     self.error = None;
                 }
@@ -755,11 +1143,12 @@ mod implementation {
             cx.notify();
         }
         fn open(&mut self, cx: &mut Context<Self>) {
-            let mut path = PathBuf::from(self.path.read(cx).content.to_string());
-            if path.extension().and_then(|x| x.to_str()) != Some("con") {
-                path.set_extension("con");
-            }
-            match crate::persistence::container::load(&path) {
+            let path = PathBuf::from(self.path.read(cx).content.to_string());
+            let imported = !path
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("con"));
+            match crate::exchange::import::load_design(&path) {
                 Ok(d) => {
                     let opened_path = self.path.read(cx).content.to_string();
                     let previous_path = self
@@ -773,7 +1162,13 @@ mod implementation {
                     self.undo.clear();
                     self.redo.clear();
                     self.design = d;
-                    self.saved_path = Some(path);
+                    self.saved_path = if imported { None } else { Some(path) };
+                    self.saved_fingerprint = if imported {
+                        crate::document::dirty::fingerprint(&Design::default())
+                    } else {
+                        crate::document::dirty::fingerprint(&self.design)
+                    };
+                    self.dirty_cache.set((u64::MAX, false));
                     self.inputs.clear();
                     self.solved.clear();
                     self.line = None;
@@ -809,11 +1204,41 @@ mod implementation {
         }
 
         fn refresh_mesh(&mut self) {
-            if self.mode == Mode::Solid
+            self.inspection_preview = false;
+            if self.mode != Mode::Drawing
                 && !self.hidden.contains("bodies")
                 && let Some((vertices, indices)) = &self.mesh
             {
-                self.gpu.set_mesh(vertices, indices);
+                let visible: Vec<u32> = indices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .filter(|triangle| {
+                        let face = vertices[triangle[0] as usize].face;
+                        self.body_faces
+                            .get(&face)
+                            .is_none_or(|body| !self.hidden_bodies.contains(body))
+                    })
+                    .flatten()
+                    .copied()
+                    .collect();
+                if self.panel == Some(Panel::Inspect)
+                    && self.inspection_action == Action::SectionAnalysis
+                {
+                    let (clipped, triangles) = crate::ui::analysis::clipped_mesh(
+                        vertices,
+                        &visible,
+                        self.section_axis,
+                        self.section_position,
+                    );
+                    self.gpu.set_mesh(&clipped, &triangles);
+                    self.inspection_preview = true;
+                } else if let Some(tinted) = self.inspection_colors(vertices) {
+                    self.gpu.set_mesh(&tinted, &visible);
+                    self.inspection_preview = true;
+                } else {
+                    self.gpu.set_mesh(vertices, &visible);
+                }
                 return;
             }
             self.gpu.set_mesh(&[], &[]);
@@ -821,6 +1246,11 @@ mod implementation {
         fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
             self.mode = mode;
             self.sketch = mode == Mode::Sketch;
+            if self.sketch {
+                self.align_sketch_pending = true;
+                self.align_to_sketch();
+                self.align_sketch_pending = true;
+            }
             self.tool = Tool::Select;
             self.anchor = None;
             self.menu = None;
@@ -844,7 +1274,39 @@ mod implementation {
                 return;
             };
             match action {
-                Action::Sketch => self.create_sketch(cx),
+                Action::ImportFusion => self.start_file_dialog(true, cx),
+                Action::Export(format) => {
+                    if self.export_dialog.is_none()
+                        && self.export_result.is_none()
+                        && self.native_dialog.is_none()
+                    {
+                        self.menu = None;
+                        self.error = None;
+                        self.export_dialog = Some((
+                            format,
+                            crate::platform::dialogs::select_export(
+                                format,
+                                self.saved_path
+                                    .clone()
+                                    .unwrap_or_else(|| PathBuf::from("Untitled.con")),
+                            ),
+                        ));
+                    }
+                }
+                Action::SolidModify(kind) => self.open_solid_modify(kind, cx),
+                Action::PhysicalMaterial | Action::Appearance | Action::ManageMaterials => {
+                    self.open_materials(action, cx)
+                }
+                Action::Sketch => {
+                    if self.selected == 0 && self.mesh.is_some() {
+                        self.choosing_sketch_face = true;
+                        self.set_mode(Mode::Solid, cx);
+                        self.status =
+                            "Select a planar face for the sketch, or choose XY plane".into();
+                    } else {
+                        self.create_sketch(cx);
+                    }
+                }
                 Action::Line
                 | Action::Rectangle
                 | Action::Circle
@@ -892,12 +1354,48 @@ mod implementation {
                 }
                 Action::Parameters => self.panel = Some(Panel::Parameters),
                 Action::Extrude => self.open_extrude(cx),
+                Action::SolidCreate(kind) => self.open_create(kind, None, cx),
                 Action::Dimension => {
                     self.panel = Some(Panel::Dimension);
                     self.tool = Tool::Dimension;
                     self.dimension_edit = None;
                     self.dimension_position = None;
                     self.anchor = None;
+                }
+                Action::Measure if self.mode == Mode::Solid => {
+                    self.inspection_action = action;
+                    self.tool = Tool::Select;
+                    self.panel = Some(Panel::Inspect);
+                }
+                Action::SectionAnalysis
+                | Action::Interference
+                | Action::CenterOfMass
+                | Action::CurvatureAnalysis
+                | Action::DraftAnalysis
+                | Action::ValidateSolid => {
+                    self.inspection_action = action;
+                    self.tool = Tool::Select;
+                    if action == Action::SectionAnalysis
+                        && let Some((vertices, _)) = &self.mesh
+                    {
+                        let min = vertices
+                            .iter()
+                            .map(|v| v.position[self.section_axis])
+                            .fold(f32::INFINITY, f32::min);
+                        let max = vertices
+                            .iter()
+                            .map(|v| v.position[self.section_axis])
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        if min.is_finite() && max.is_finite() {
+                            self.section_position = (min + max) * 0.5;
+                            self.section_offset = cx.new(|cx| {
+                                TextInput::new(&format!("{} mm", self.section_position * 40.), cx)
+                            });
+                        }
+                    }
+
+                    self.panel = Some(Panel::Inspect);
+                    self.refresh_mesh();
                 }
                 Action::Measure => {
                     self.tool = Tool::Measure;
@@ -949,21 +1447,17 @@ mod implementation {
                 | Action::ViewRight
                 | Action::ViewTop
                 | Action::ViewBottom => {
-                    if self.sketch {
-                        self.status = "Sketch view is locked to its local plane".into();
-                    } else {
-                        use nalgebra::Vector3;
-                        let (direction, up) = match action {
-                            Action::ViewFront => (-Vector3::y(), Vector3::z()),
-                            Action::ViewBack => (Vector3::y(), Vector3::z()),
-                            Action::ViewLeft => (-Vector3::x(), Vector3::z()),
-                            Action::ViewRight => (Vector3::x(), Vector3::z()),
-                            Action::ViewTop => (Vector3::z(), Vector3::y()),
-                            _ => (-Vector3::z(), -Vector3::y()),
-                        };
-                        self.camera.set_direction(direction, up);
-                        self.changed_camera();
-                    }
+                    use nalgebra::Vector3;
+                    let (direction, up) = match action {
+                        Action::ViewFront => (-Vector3::y(), Vector3::z()),
+                        Action::ViewBack => (Vector3::y(), Vector3::z()),
+                        Action::ViewLeft => (-Vector3::x(), Vector3::z()),
+                        Action::ViewRight => (Vector3::x(), Vector3::z()),
+                        Action::ViewTop => (Vector3::z(), Vector3::y()),
+                        _ => (-Vector3::z(), -Vector3::y()),
+                    };
+                    self.camera.set_direction(direction, up);
+                    self.changed_camera();
                 }
                 Action::Finish => {
                     self.set_mode(Mode::Solid, cx);
@@ -975,6 +1469,7 @@ mod implementation {
             {
                 input.update(cx, |input, cx| input.focus_and_select(window, cx));
             }
+            self.refresh_mesh();
             cx.notify();
         }
         fn restore_edit(&mut self, cx: &mut Context<Self>) {
@@ -982,7 +1477,11 @@ mod implementation {
             self.solved.clear();
             self.line = None;
             self.anchor = None;
-            self.construction_cursor = None;
+            self.construction_cursor = if self.sketch {
+                self.design.current_sketch_id()
+            } else {
+                None
+            };
             self.before_construction = false;
             self.editing_feature = None;
             self.selection.clear();
@@ -1013,6 +1512,21 @@ mod implementation {
             }
         }
         fn construction_step(&mut self, id: Option<Uuid>, edit: bool, cx: &mut Context<Self>) {
+            if edit
+                && let Some(modify) =
+                    id.filter(|id| self.design.solid_edits.iter().any(|e| e.id == *id))
+            {
+                self.open_modify_edit(modify, cx);
+                return;
+            }
+            if edit
+                && let Some(f) = id
+                    .and_then(|id| self.design.create_features.iter().find(|f| f.id == id))
+                    .cloned()
+            {
+                self.open_create(f.kind, Some(f.id), cx);
+                return;
+            }
             self.construction_cursor = id;
             self.before_construction = false;
             self.menu = None;
@@ -1044,12 +1558,12 @@ mod implementation {
                 Mode::Solid
             };
             self.sketch = self.mode == Mode::Sketch;
-            self.panel = if edit {
-                Some(if self.sketch {
-                    Panel::Parameters
-                } else {
-                    Panel::Extrude
-                })
+            if self.sketch {
+                self.align_to_sketch();
+                self.align_sketch_pending = true;
+            }
+            self.panel = if edit && !self.sketch {
+                Some(Panel::Extrude)
             } else {
                 None
             };
@@ -1106,11 +1620,18 @@ mod implementation {
         }
         fn panel_fields(&self) -> Vec<Entity<TextInput>> {
             match self.panel {
+                Some(Panel::SolidModify | Panel::Materials) => self.solid_editor.fields.clone(),
+                Some(Panel::Inspect) if self.inspection_action == Action::SectionAnalysis => {
+                    vec![self.section_offset.clone()]
+                }
                 Some(Panel::Extrude) => vec![self.depth.clone()],
+                Some(Panel::Create) => self
+                    .create_editor
+                    .as_ref()
+                    .map_or_else(Vec::new, |e| e.fields.clone()),
                 Some(Panel::Dimension | Panel::Offset | Panel::Fillet) => {
                     vec![self.dimension.clone()]
                 }
-                Some(Panel::Document) => vec![self.path.clone()],
                 Some(Panel::Search) => vec![self.search.clone()],
                 Some(Panel::Parameters) => {
                     self.inputs.iter().map(|(_, input)| input.clone()).collect()
@@ -1146,7 +1667,38 @@ mod implementation {
         fn confirm_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             self.error = None;
             match self.panel {
+                Some(Panel::SolidModify) => self.apply_solid_modify(cx),
+                Some(Panel::Materials) => self.apply_material(cx),
+                Some(Panel::Inspect) if self.inspection_action == Action::SectionAnalysis => {
+                    let mut input = Design::default();
+                    let id = input.parameter(
+                        "section_offset",
+                        crate::parameters::expression::dimension_input(
+                            &self.section_offset.read(cx).content,
+                            false,
+                        ),
+                    );
+                    match crate::parameters::expression::evaluate(&input) {
+                        Ok(values)
+                            if values[&id].is_finite()
+                                && (values[&id] * 25.).abs() <= f32::MAX as f64 =>
+                        {
+                            self.section_position = (values[&id] * 25.) as f32;
+                            self.changed_camera();
+                            self.refresh_mesh();
+                        }
+                        Ok(_) => {
+                            self.error = Some(
+                                "Enter a finite section offset within the coordinate range".into(),
+                            )
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                    cx.notify();
+                    return;
+                }
                 Some(Panel::Dimension) => self.apply_dimension(cx),
+                Some(Panel::Create) => self.apply_create(cx),
                 Some(Panel::Extrude) => {
                     let mut preview = Design {
                         parameters: self.design.parameters.clone(),
@@ -1177,13 +1729,6 @@ mod implementation {
                 Some(Panel::Parameters) => self.apply_parameters(cx),
                 Some(Panel::Offset) => self.apply_offset_or_fillet(false, cx),
                 Some(Panel::Fillet) => self.apply_offset_or_fillet(true, cx),
-                Some(Panel::Document) => {
-                    if self.file_open {
-                        self.open(cx);
-                    } else {
-                        self.save(cx);
-                    }
-                }
                 _ => return,
             }
             if self.error.is_none() {
@@ -1193,6 +1738,46 @@ mod implementation {
             cx.notify();
         }
         fn keyboard(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+            if self.native_dialog.is_some() {
+                cx.stop_propagation();
+                return;
+            }
+            if self.close_target.is_some() {
+                if event.keystroke.key == "escape" {
+                    self.close_target = None;
+                    self.close_approved.clear();
+                    cx.notify();
+                }
+                if event.keystroke.key == "tab" {
+                    self.close_choice = (self.close_choice
+                        + if event.keystroke.modifiers.shift {
+                            2
+                        } else {
+                            1
+                        })
+                        % 3;
+                    cx.notify();
+                }
+                if event.keystroke.key == "enter" {
+                    match self.close_choice {
+                        0 => {
+                            self.close_target = None;
+                            self.close_approved.clear();
+                            window.focus(&self.focus);
+                            cx.notify();
+                        }
+                        1 => {
+                            if matches!(self.close_target, Some(CloseTarget::Window)) {
+                                self.close_approved.insert(self.active_document);
+                            }
+                            self.finish_close(window, cx);
+                        }
+                        _ => self.request_save(window, cx),
+                    }
+                }
+                cx.stop_propagation();
+                return;
+            }
             if self.panel == Some(Panel::Search) {
                 let query = self.search.read(cx).content.to_lowercase();
                 let matches: Vec<_> = toolbar::groups(self.mode)
@@ -1310,23 +1895,15 @@ mod implementation {
                 "undo" => self.undo_edit(cx),
                 "redo" => self.redo_edit(cx),
                 "new" => self.new_document(cx),
-                "save" => {
-                    if self.saved_path.is_some() {
-                        self.save(cx)
-                    } else {
-                        self.file_open = false;
-                        self.panel = Some(Panel::Document)
-                    }
-                }
-                "open" => {
-                    self.file_open = true;
-                    self.panel = Some(Panel::Document)
-                }
+                "save" => self.request_save(window, cx),
+                "save-as" => self.start_file_dialog(false, cx),
+                "open" => self.start_file_dialog(true, cx),
                 "cancel" => {
                     self.finish_sketch_drag(true, cx);
                     self.anchor = None;
                     self.arc_start = None;
                     self.tool_points.clear();
+                    self.choosing_sketch_face = false;
                     self.tool = Tool::Select;
                     self.selection.clear();
                     self.line = None;
@@ -1374,7 +1951,7 @@ mod implementation {
                     button("file-open", "open", "Open design · Ctrl+O", false, true).on_click(
                         cx.listener(|this, _, _, cx| {
                             this.file_open = true;
-                            this.panel = Some(Panel::Document);
+                            this.start_file_dialog(this.file_open, cx);
                             this.menu = None;
                             cx.notify();
                         }),
@@ -1404,12 +1981,12 @@ mod implementation {
                 )
                 .child(
                     button("file-save", "save", "Save · Ctrl+S", false, true).on_click(
-                        cx.listener(|this, _, _, cx| {
+                        cx.listener(|this, _, window, cx| {
                             if this.saved_path.is_some() {
-                                this.save(cx);
+                                this.request_save(window, cx);
                             } else {
                                 this.file_open = false;
-                                this.panel = Some(Panel::Document);
+                                this.start_file_dialog(this.file_open, cx);
                             }
                             this.menu = None;
                             cx.notify();
@@ -1461,6 +2038,14 @@ mod implementation {
                         }))
                         .cursor_pointer()
                         .child(name)
+                        .when(
+                            if index == self.active_document {
+                                self.dirty()
+                            } else {
+                                tab.dirty
+                            },
+                            |el| el.child(div().text_color(rgb(t::WARNING)).child("•")),
+                        )
                         .child(
                             button(
                                 ("close-document", index),
@@ -1471,9 +2056,10 @@ mod implementation {
                             )
                             .size(px(26.))
                             .on_click(cx.listener(
-                                move |this, _, _, cx| {
+                                move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.close_document(index, cx);
+                                    this.request_close_document(index, cx);
+                                    window.focus(&this.focus);
                                 },
                             )),
                         )
@@ -1569,17 +2155,32 @@ mod implementation {
                         .hover(|s| s.bg(rgb(t::HOVER)))
                         .child(name)
                         .child(div().text_color(rgb(t::MUTED)).child("▾"))
-                        .tooltip(move |_, cx| cx.new(|_| GroupTip(name)).into())
+                        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                            if *hovered {
+                                this.menu_leave_deadline = None;
+                            } else if this.menu == Some(name) {
+                                this.menu_leave_deadline = Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_millis(150),
+                                );
+                            }
+                            if *hovered && this.menu != Some(name) {
+                                this.menu_x = (f64::from(window.mouse_position().x) as f32 - 48.)
+                                    .clamp(
+                                        8.,
+                                        f64::from(window.bounds().size.width).max(352.) as f32
+                                            - 336.,
+                                    );
+                                this.menu = Some(name);
+                                cx.notify();
+                            }
+                        }))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.menu_x = (f64::from(event.position().x) as f32 - 48.).clamp(
                                 8.,
                                 f64::from(window.bounds().size.width).max(352.) as f32 - 336.,
                             );
-                            this.menu = if this.menu == Some(name) {
-                                None
-                            } else {
-                                Some(name)
-                            };
+                            this.menu = Some(name);
                             cx.notify();
                         })),
                 );
@@ -1700,6 +2301,29 @@ mod implementation {
                                         self.mode == Mode::Sketch
                                             && self.design.current_sketch_id() == Some(id),
                                     )
+                                    .child(div().flex_1())
+                                    .child(
+                                        text_button(
+                                            SharedString::from(format!("sketch-visible-{id}")),
+                                            if self.hidden_sketches.contains(&id) {
+                                                "○"
+                                            } else {
+                                                "●"
+                                            },
+                                            "Toggle sketch visibility",
+                                        )
+                                        .size(px(24.))
+                                        .bg(rgba(0))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if !this.hidden_sketches.remove(&id) {
+                                                    this.hidden_sketches.insert(id);
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
                                     .on_click(cx.listener(
                                         move |this, _, window, cx| {
                                             this.construction_step(Some(id), true, cx);
@@ -1710,23 +2334,85 @@ mod implementation {
                             }
                         }
                         "bodies" => {
-                            let features = self.design.solid_features();
-                            for e in features.iter().filter(|e| {
-                                !features.iter().any(|other| other.target == Some(e.id))
-                            }) {
-                                let id = e.id;
+                            for (id, name) in self.design.current_create_bodies() {
                                 rows = rows.child(
                                     tree_item(
                                         SharedString::from(format!("body-{id}")),
                                         "create_block",
-                                        &e.name,
+                                        &name,
                                         self.construction_cursor == Some(id),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        text_button(
+                                            SharedString::from(format!("body-visible-{id}")),
+                                            if self.hidden_bodies.contains(&(id, 0)) {
+                                                "○"
+                                            } else {
+                                                "●"
+                                            },
+                                            "Toggle body visibility",
+                                        )
+                                        .size(px(24.))
+                                        .bg(rgba(0))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if !this.hidden_bodies.remove(&(id, 0)) {
+                                                    this.hidden_bodies.insert((id, 0));
+                                                }
+                                                this.refresh_mesh();
+                                                this.changed_camera();
+                                                cx.notify();
+                                            }),
+                                        ),
                                     )
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
                                             this.construction_step(Some(id), true, cx)
                                         },
                                     )),
+                                );
+                            }
+                            for e in self
+                                .design
+                                .solid_features()
+                                .iter()
+                                .filter(|e| e.operation == ExtrudeOperation::CutNewBody)
+                            {
+                                let id = e.id;
+                                rows = rows.child(
+                                    tree_item(
+                                        SharedString::from(format!("cut-body-{id}")),
+                                        "create_block",
+                                        &format!("{} · cut body", e.name),
+                                        false,
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        text_button(
+                                            SharedString::from(format!("cut-visible-{id}")),
+                                            if self.hidden_bodies.contains(&(id, 1)) {
+                                                "○"
+                                            } else {
+                                                "●"
+                                            },
+                                            "Toggle cut body visibility",
+                                        )
+                                        .size(px(24.))
+                                        .bg(rgba(0))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if !this.hidden_bodies.remove(&(id, 1)) {
+                                                    this.hidden_bodies.insert((id, 1));
+                                                }
+                                                this.refresh_mesh();
+                                                this.changed_camera();
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
                                 );
                             }
                         }
@@ -1810,15 +2496,24 @@ mod implementation {
                 let at = self
                     .dimension_position
                     .or_else(|| {
-                        self.dimension_edit
-                            .and_then(|id| self.design.dimension_positions.get(&id).copied())
+                        self.dimension_edit.and_then(|id| {
+                            let d = self.display_design();
+                            d.constraints
+                                .iter()
+                                .chain(&d.driven_dimensions)
+                                .find(|c| c.id == id)
+                                .map(|c| self.dimension_anchor(&d, c))
+                        })
                     })
                     .or(self.hover);
                 if let (Some(at), Some(bounds)) = (at, self.bounds.get()) {
                     let width = f64::from(bounds.size.width) as f32;
                     let height = f64::from(bounds.size.height) as f32;
-                    let x = width * 0.5 + ((at[0] - self.center[0]) * self.scale) as f32 + 16.;
-                    let y = height * 0.5 - ((at[1] - self.center[1]) * self.scale) as f32 + 16.;
+                    let screen = self
+                        .sketch_screen(at)
+                        .unwrap_or([width as f64 * 0.5, height as f64 * 0.5]);
+                    let x = screen[0] as f32 + 16.;
+                    let y = screen[1] as f32 + 16.;
                     body = body
                         .right(Length::Auto)
                         .left(px(x.clamp(8., (width - 198.).max(8.))))
@@ -1878,18 +2573,16 @@ mod implementation {
                 return Some(editor);
             }
             let title = match panel {
-                Panel::Document => {
-                    if self.file_open {
-                        "Open design"
-                    } else {
-                        "Save design"
-                    }
-                }
                 Panel::Parameters => "Parameters",
                 Panel::Extrude => "Extrude",
+                Panel::Create => self
+                    .create_editor
+                    .as_ref()
+                    .map_or("Create", |e| e.kind.name()),
                 Panel::Dimension => "Dimension",
                 Panel::View => "View",
                 Panel::Measure => "Measure",
+                Panel::Inspect => self.inspection_title(),
                 Panel::Offset => "Offset",
                 Panel::Search => "Sketch toolbox",
                 Panel::Transform => match self.transform_action {
@@ -1900,6 +2593,12 @@ mod implementation {
                     _ => "Move / copy",
                 },
                 Panel::Fillet => "Sketch fillet",
+                Panel::SolidModify => self.solid_editor.kind.label(),
+                Panel::Materials => match self.solid_editor.material_action {
+                    Action::Appearance => "Appearance",
+                    Action::ManageMaterials => "Manage materials",
+                    _ => "Physical material",
+                },
             };
             body = body.child(
                 div()
@@ -1918,6 +2617,7 @@ mod implementation {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.error = None;
                                 this.panel = None;
+                                this.refresh_mesh();
                                 window.focus(&this.focus);
                                 cx.notify();
                             })),
@@ -1933,21 +2633,11 @@ mod implementation {
                 .flex_col()
                 .gap_3();
             match panel {
-                Panel::Document => {
-                    content = content.child(self.path.clone()).child(
-                        div().flex().justify_end().child(
-                            button(
-                                "confirm-file",
-                                if self.file_open { "open" } else { "save" },
-                                title,
-                                false,
-                                true,
-                            )
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.confirm_editor(window, cx)),
-                            ),
-                        ),
-                    );
+                Panel::Create => {
+                    content = content.child(self.create_controls(cx));
+                }
+                Panel::SolidModify | Panel::Materials => {
+                    content = self.solid_modify_content(content, cx);
                 }
                 Panel::Parameters => {
                     for (id, input) in &self.inputs {
@@ -2003,11 +2693,12 @@ mod implementation {
                     }
                 }
                 Panel::Extrude => {
-                    let mut operations = div().flex().gap_1();
+                    let mut operations = div().flex().flex_wrap().gap_1();
                     for (operation, label) in [
                         (ExtrudeOperation::NewBody, "New body"),
                         (ExtrudeOperation::Join, "Join"),
                         (ExtrudeOperation::Cut, "Cut"),
+                        (ExtrudeOperation::CutNewBody, "Cut and new body"),
                     ] {
                         operations = operations.child(
                             div()
@@ -2079,7 +2770,10 @@ mod implementation {
                             ),
                         )
                         .child(div().text_size(px(11.)).text_color(rgb(t::MUTED)).child(
-                            if self.extrude_operation == ExtrudeOperation::Cut {
+                            if matches!(
+                                self.extrude_operation,
+                                ExtrudeOperation::Cut | ExtrudeOperation::CutNewBody
+                            ) {
                                 "Cut inward from sketch plane"
                             } else {
                                 "Extrude outward from sketch plane"
@@ -2216,6 +2910,46 @@ mod implementation {
                     if matches.is_empty() {
                         content = content
                             .child(div().text_color(rgb(t::MUTED)).child("No matching tools"));
+                    }
+                }
+                Panel::Inspect => {
+                    for line in self.inspection_lines() {
+                        content = content.child(line);
+                    }
+                    if self.inspection_action == Action::SectionAnalysis {
+                        let mut axes = div().flex().gap_2();
+                        for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+                            axes = axes.child(
+                                text_button(
+                                    SharedString::from(format!("section-axis-{axis}")),
+                                    label,
+                                    "Section plane normal",
+                                )
+                                .when(self.section_axis == axis, |el| el.bg(rgb(t::SELECTED)))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.section_axis = axis;
+                                        this.changed_camera();
+                                        this.refresh_mesh();
+                                        cx.notify();
+                                    },
+                                )),
+                            );
+                        }
+                        content = content
+                            .child(axes)
+                            .child("Offset from origin")
+                            .child(self.section_offset.clone())
+                            .child(
+                                text_button(
+                                    "apply-section",
+                                    "Update section",
+                                    "Apply plane offset · Enter",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.confirm_editor(window, cx),
+                                )),
+                            );
                     }
                 }
                 Panel::Measure => {
@@ -2383,11 +3117,7 @@ mod implementation {
             )
         }
         fn cube_camera(&self) -> Camera {
-            let mut camera = self.camera.clone();
-            if self.sketch {
-                camera.set_direction(nalgebra::Vector3::z(), nalgebra::Vector3::y());
-            }
-            camera
+            self.camera.clone()
         }
         fn navigation(&self, cx: &mut Context<Self>) -> Div {
             let camera = self.cube_camera();
@@ -2409,6 +3139,16 @@ mod implementation {
                 .flex()
                 .flex_col()
                 .gap_1();
+            overlay = overlay.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(t::MUTED))
+                    .text_right()
+                    .child(format!(
+                        "{:.0} FPS · {:.1} ms",
+                        self.frame_rate.fps, self.frame_rate.milliseconds
+                    )),
+            );
             overlay = overlay.child(
                 div()
                     .id("view-cube")
@@ -2444,17 +3184,8 @@ mod implementation {
                                     f64::from(event.position.y - bounds.origin.y),
                                 ];
                                 if let Some(face) = view_cube::pick(&this.cube_camera(), p) {
-                                    if this.sketch {
-                                        if face.label == "Top" {
-                                            this.fit();
-                                        } else {
-                                            this.status =
-                                                "Sketch view is locked to its local plane".into();
-                                        }
-                                    } else {
-                                        this.camera.set_direction(face.direction, face.up);
-                                        this.changed_camera();
-                                    }
+                                    this.camera.set_direction(face.direction, face.up);
+                                    this.changed_camera();
                                     cx.stop_propagation();
                                     cx.notify();
                                 }
@@ -2598,6 +3329,7 @@ mod implementation {
                         match feature.kind {
                             ConstructionKind::Sketch => "line_rectangle",
                             ConstructionKind::Extrude { .. } => "up",
+                            ConstructionKind::Create | ConstructionKind::Modify => "up",
                         },
                         &format!("{} · Edit feature", feature.name),
                         self.construction_cursor == Some(id),
@@ -2711,9 +3443,17 @@ mod implementation {
                     },
                     Feature {
                         id: "export-stl",
-                        name: "STL",
+                        name: "STL (millimetres)",
                         icon: "export",
-                        action: None,
+                        action: Some(Action::Export(crate::exchange::export::ExportFormat::Stl)),
+                    },
+                    Feature {
+                        id: "export-3mf",
+                        name: "3MF",
+                        icon: "export",
+                        action: Some(Action::Export(
+                            crate::exchange::export::ExportFormat::ThreeMf,
+                        )),
                     },
                 ]
             } else {
@@ -2725,6 +3465,14 @@ mod implementation {
             };
             let mut menu = div()
                 .id("tool-menu")
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.menu_leave_deadline = if *hovered {
+                        None
+                    } else {
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(150))
+                    };
+                    cx.notify();
+                }))
                 .absolute()
                 .top(px(136.))
                 .left(px(self.menu_x))
@@ -2930,6 +3678,10 @@ mod implementation {
                             ends.map(|id| crate::sketch::entities::point(&d, id)),
                             at,
                             direction,
+                            matches!(
+                                c.kind,
+                                ConstraintKind::Diameter { .. } | ConstraintKind::Radius { .. }
+                            ),
                         ))
                     }
                 }
@@ -2939,10 +3691,7 @@ mod implementation {
                 dimensions.clear();
             }
             let mut constraint_markers = Vec::new();
-            if self.sketch
-                && self.show_constraints
-                && let Some(bounds) = self.bounds.get()
-            {
+            if self.sketch && self.show_constraints && self.bounds.get().is_some() {
                 let mut placed: Vec<[f64; 2]> = Vec::new();
                 for c in &d.constraints {
                     if c.kind.parameter().is_some() {
@@ -2959,22 +3708,18 @@ mod implementation {
                     placed.push(at);
                     let id = c.id;
                     let label = c.kind.label();
-                    let x =
-                        f64::from(bounds.size.width) * 0.5 + (at[0] - self.center[0]) * self.scale;
-                    let y =
-                        f64::from(bounds.size.height) * 0.5 - (at[1] - self.center[1]) * self.scale;
+                    let [x, y] = self.sketch_screen(at).unwrap_or([-10000., -10000.]);
                     constraint_markers.push(
-                        button(
+                        crate::ui::components::constraint_button(
                             SharedString::from(format!("constraint-{id}")),
                             c.kind.icon(),
                             label,
                             self.selection.contains(&id),
-                            true,
                         )
                         .absolute()
-                        .left(px(x as f32 + 7. + offset * 24.))
-                        .top(px(y as f32 - 27.))
-                        .size(px(24.))
+                        .left(px(x as f32 + 7. + offset * 18.))
+                        .top(px(y as f32 - 20.))
+                        .size(px(16.))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -3018,17 +3763,104 @@ mod implementation {
                     })
                     .collect();
             }
+            let mut preview_curves = Vec::new();
+            if let Some(hover) = self.hover {
+                let mut points = self.tool_points.clone();
+                points.push(hover);
+                let mut draft = Design::default();
+                match (self.tool, points.as_slice()) {
+                    (Tool::CenterRectangle, [a, b]) => {
+                        let c = [2. * a[0] - b[0], 2. * a[1] - b[1]];
+                        preview = vec![c, [b[0], c[1]], *b, [c[0], b[1]], c];
+                    }
+                    (Tool::Circle2, [a, b]) => {
+                        let center = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+                        let _ = crate::sketch::edit::circle(&mut draft, center, *b, None);
+                    }
+                    (Tool::Circle3, [a, b, c]) => {
+                        if let Ok(center) = crate::sketch::edit::circumcenter(*a, *b, *c) {
+                            let _ = crate::sketch::edit::circle(&mut draft, center, *a, None);
+                        }
+                    }
+                    (Tool::Arc3, [a, b, c]) => {
+                        if let Ok(center) = crate::sketch::edit::circumcenter(*a, *b, *c) {
+                            let cross =
+                                (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+                            let (start, end) = if cross > 0. { (*a, *c) } else { (*c, *a) };
+                            let _ =
+                                crate::sketch::edit::circle(&mut draft, center, start, Some(end));
+                        }
+                    }
+                    (Tool::Spline, points) if points.len() >= 2 => {
+                        let _ = crate::sketch::edit::spline(&mut draft, points, true);
+                    }
+                    (Tool::Ellipse, [a, b, c]) => {
+                        let _ = crate::sketch::edit::ellipse(&mut draft, *a, *b, *c);
+                    }
+                    (Tool::Slot, [a, b, c]) => {
+                        let _ = crate::sketch::edit::slot(&mut draft, *a, *b, *c);
+                    }
+                    (Tool::Polygon, [a, b]) => {
+                        let _ = crate::sketch::edit::polygon(
+                            &mut draft,
+                            *a,
+                            *b,
+                            self.transform_count.read(cx).content.parse().unwrap_or(6),
+                        );
+                    }
+                    _ => {}
+                }
+                let curves = crate::sketch::entities::curve_ids(&draft);
+                if !curves.is_empty() {
+                    preview.clear();
+                    for id in curves {
+                        preview_curves.push(crate::sketch::entities::samples(&draft, id));
+                    }
+                }
+            }
+            let region_wires = self
+                .sketch_region
+                .as_ref()
+                .filter(|region| {
+                    self.sketch && region.boundary.iter().all(|id| self.selection.contains(id))
+                })
+                .map(|region| {
+                    region
+                        .wires
+                        .iter()
+                        .map(|wire| wire.iter().flat_map(|edge| edge.samples()).collect())
+                        .collect()
+                })
+                .unwrap_or_default();
             let overlay = SketchCanvas {
                 bounds: self.bounds.clone(),
-                active: self.sketch,
-                visible: !self.hidden.contains("sketches"),
-                grid: self.grid,
-                axes: !self.hidden.contains("origin"),
+                camera: self.camera.clone(),
+                frame: self.active_frame(),
+                placement_preview: self.sketch
+                    && !matches!(
+                        self.tool,
+                        Tool::Select
+                            | Tool::Dimension
+                            | Tool::Measure
+                            | Tool::Trim
+                            | Tool::Extend
+                            | Tool::Break
+                    ),
+                active: self.mode != Mode::Drawing,
+                visible: !self.hidden.contains("sketches")
+                    && !self
+                        .design
+                        .current_sketch_id()
+                        .is_some_and(|id| self.hidden_sketches.contains(&id)),
+                grid: false,
+                axes: false,
                 coords,
                 lines,
                 annotations,
                 selected: self.selection.clone(),
                 preview,
+                preview_curves,
+                region_wires,
                 dimensions,
                 point_colors,
                 anchor: if matches!(self.tool, Tool::Line | Tool::Rectangle) {
@@ -3052,7 +3884,75 @@ mod implementation {
                 .bg(rgb(t::VIEWPORT))
                 .child(wgpu_surface(self.gpu.surface.clone()).absolute().inset_0())
                 .child(overlay.element())
+                .children(
+                    self.world_sketches
+                        .iter()
+                        .filter(|(id, _, _)| {
+                            Some(*id) != self.design.current_sketch_id()
+                                && !self.hidden_sketches.contains(id)
+                        })
+                        .map(|(_, design, frame)| {
+                            SketchCanvas {
+                                bounds: self.bounds.clone(),
+                                camera: self.camera.clone(),
+                                frame: *frame,
+                                placement_preview: false,
+                                active: self.mode != Mode::Drawing
+                                    && !self.hidden.contains("sketches"),
+                                visible: true,
+                                grid: false,
+                                axes: false,
+                                coords: vec![],
+                                lines: crate::sketch::entities::curve_ids(design)
+                                    .into_iter()
+                                    .map(|id| {
+                                        (
+                                            id,
+                                            crate::sketch::entities::samples(design, id),
+                                            t::MUTED,
+                                            false,
+                                        )
+                                    })
+                                    .collect(),
+                                preview: vec![],
+                                preview_curves: vec![],
+                                region_wires: vec![],
+                                dimensions: vec![],
+                                point_colors: vec![],
+                                annotations: vec![],
+                                selected: vec![],
+                                anchor: None,
+                                hover: None,
+                                rectangle: false,
+                                scale: self.scale,
+                                center: self.center,
+                            }
+                            .element()
+                        }),
+                )
+                .children(self.choosing_sketch_face.then(|| {
+                    div()
+                        .absolute()
+                        .top(px(16.))
+                        .left(px(280.))
+                        .p_2()
+                        .bg(rgb(t::PANEL))
+                        .child("Select a planar face · ")
+                        .child(
+                            div()
+                                .id("sketch-xy-plane")
+                                .cursor_pointer()
+                                .child("Use XY plane")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.choosing_sketch_face = false;
+                                    this.selected = 0;
+                                    this.create_sketch(cx);
+                                })),
+                        )
+                }))
+                .children(self.extrusion_preview(cx).map(|preview| preview.element()))
                 .children(constraint_markers)
+                .children(self.center_of_mass_marker())
                 .when(self.mode == Mode::Drawing, |el| {
                     el.child(
                         div()
@@ -3092,6 +3992,39 @@ mod implementation {
                         }
                         window.focus(&this.focus);
                         this.menu = None;
+                        if let (Some(preview), Some(bounds)) =
+                            (this.extrusion_preview(cx), this.bounds.get())
+                        {
+                            let base = preview.frame.world(preview.center);
+                            let project = |depth: f64| {
+                                this.camera.project(
+                                    nalgebra::Point3::from(
+                                        (base + preview.frame.normal * depth).coords * 25.,
+                                    ),
+                                    [
+                                        f64::from(bounds.size.width) as u32,
+                                        f64::from(bounds.size.height) as u32,
+                                    ],
+                                )
+                            };
+                            if let (Some(handle), Some(next)) =
+                                (project(preview.depth), project(preview.depth + 0.001))
+                            {
+                                let cursor = [
+                                    f64::from(event.position.x - bounds.origin.x),
+                                    f64::from(event.position.y - bounds.origin.y),
+                                ];
+                                if (cursor[0] - handle[0]).hypot(cursor[1] - handle[1]) < 15. {
+                                    this.extrude_drag = Some((
+                                        event.position,
+                                        preview.depth,
+                                        [next[0] - handle[0], next[1] - handle[1]],
+                                    ));
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
                         if this.sketch {
                             this.sketch_click(
                                 event.position,
@@ -3119,6 +4052,27 @@ mod implementation {
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Some((start, initial, axis)) = this.extrude_drag {
+                        if event.pressed_button != Some(MouseButton::Left) {
+                            this.extrude_drag = None;
+                        } else {
+                            let delta = [
+                                f64::from(event.position.x - start.x),
+                                f64::from(event.position.y - start.y),
+                            ];
+                            let length = axis[0] * axis[0] + axis[1] * axis[1];
+                            if length > 1e-8 {
+                                let signed = initial
+                                    + (delta[0] * axis[0] + delta[1] * axis[1]) / length * 0.001;
+                                let depth = (signed * initial.signum()).max(0.0001);
+                                this.depth.update(cx, |input, cx| {
+                                    input.set_content(format!("{:.3} mm", depth * 1000.), cx)
+                                });
+                            }
+                            cx.notify();
+                            return;
+                        }
+                    }
                     if this.sketch {
                         this.hover = this.sketch_position(
                             event.position,
@@ -3132,6 +4086,7 @@ mod implementation {
                             })
                         {
                             this.design.dimension_positions.insert(*id, at);
+                            this.dirty_cache.set((u64::MAX, false));
                             *moved = true;
                         }
                         if let Some((_, current, _)) = &mut this.marquee
@@ -3194,10 +4149,7 @@ mod implementation {
                         f64::from(event.position.y - drag.previous.y),
                     ];
                     drag.previous = event.position;
-                    if this.sketch {
-                        this.center[0] -= delta[0] / this.scale;
-                        this.center[1] += delta[1] / this.scale;
-                    } else if event.modifiers.control {
+                    if event.modifiers.control {
                         this.camera.free_orbit(delta);
                     } else if event.modifiers.shift {
                         this.camera.orbit(delta);
@@ -3210,11 +4162,17 @@ mod implementation {
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.finish_sketch_drag(false, cx)),
+                    cx.listener(|this, _, _, cx| {
+                        this.extrude_drag = None;
+                        this.finish_sketch_drag(false, cx);
+                    }),
                 )
                 .on_mouse_up_out(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.finish_sketch_drag(false, cx)),
+                    cx.listener(|this, _, _, cx| {
+                        this.extrude_drag = None;
+                        this.finish_sketch_drag(false, cx);
+                    }),
                 )
                 .on_mouse_up(
                     MouseButton::Middle,
@@ -3229,28 +4187,14 @@ mod implementation {
                         return;
                     }
                     let delta = f64::from(event.delta.pixel_delta(px(40.)).y);
-                    if this.sketch {
-                        this.scale = (this.scale * (delta * 0.0025).exp()).clamp(500., 100000.);
-                    } else {
-                        this.camera.zoom(delta);
-                    }
+                    this.camera.distance =
+                        (this.camera.distance * (-delta * 0.0025).exp()).clamp(0.002, 100.);
+                    let height = this.bounds.get().map_or(575., |b| f64::from(b.size.height));
+                    this.scale = height * 25.
+                        / (2. * this.camera.distance * (Camera::FIELD_OF_VIEW / 2.).tan());
                     this.changed_camera();
                     cx.notify();
                 }))
-        }
-    }
-    struct GroupTip(&'static str);
-    impl Render for GroupTip {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .px_3()
-                .py_2()
-                .bg(rgb(t::PANEL))
-                .border_1()
-                .border_color(rgb(t::BORDER))
-                .text_color(rgb(t::TEXT))
-                .text_size(px(12.))
-                .child(self.0)
         }
     }
     fn tree_item(
@@ -3307,37 +4251,21 @@ mod implementation {
                 .fold([0., 0.], |a, b| [a[0] + b[0] * 0.25, a[1] + b[1] * 0.25]);
             paint_label(
                 face.label,
-                screen(center) - point(px(12.), px(6.)),
+                screen(center) - point(px(face.label.len() as f32 * 2.6), px(6.)),
                 t::MUTED,
                 10.,
                 window,
                 cx,
             );
         }
-        let origin = [25., 94.];
-        for (name, axis, color) in [
-            ("X", nalgebra::Vector3::x(), t::ERROR),
-            ("Y", nalgebra::Vector3::y(), t::SUCCESS),
-            ("Z", nalgebra::Vector3::z(), t::ACCENT),
-        ] {
-            let end = [
-                origin[0] + axis.dot(&camera.right()) * 18.,
-                origin[1] - axis.dot(&camera.up()) * 18.,
-            ];
-            let mut path = PathBuilder::stroke(px(1.));
-            path.move_to(screen(origin));
-            path.line_to(screen(end));
+
+        for axis in view_cube::axes(camera) {
+            let mut path = PathBuilder::stroke(px(2.));
+            path.move_to(screen(axis.origin));
+            path.line_to(screen(axis.end));
             if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(color));
+                window.paint_path(path, rgb(axis.color));
             }
-            paint_label(
-                name,
-                screen(end) + point(px(2.), px(-5.)),
-                color,
-                9.,
-                window,
-                cx,
-            );
         }
     }
     fn paint_label(
@@ -3366,76 +4294,232 @@ mod implementation {
     }
     impl Render for WorkspaceView {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self
+                .menu_leave_deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                self.menu = None;
+                self.menu_leave_deadline = None;
+            }
+            if !self.close_hook_installed {
+                let entity = cx.entity().downgrade();
+                window.on_window_should_close(cx, move |window, cx| {
+                    entity
+                        .update(cx, |this, cx| this.request_window_close(window, cx))
+                        .unwrap_or(true)
+                });
+                self.close_hook_installed = true;
+            }
+            let export_chosen = self.export_dialog.as_ref().and_then(|(format, receiver)| {
+                match receiver.try_recv() {
+                    Ok(path) => Some((*format, path)),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((*format, None)),
+                    Err(_) => None,
+                }
+            });
+            if let Some((format, path)) = export_chosen {
+                self.export_dialog = None;
+                if let Some(mut path) = path {
+                    path.set_extension(format.extension());
+                    let design = self.design.clone();
+                    let (send, receive) = std::sync::mpsc::channel();
+                    self.export_result = Some(receive);
+                    self.status = "Exporting model…".into();
+                    std::thread::spawn(move || {
+                        let result = crate::exchange::export::export_design(&path, &design, format)
+                            .map(|()| path);
+                        let _ = send.send(result);
+                    });
+                }
+            }
+            let export_result =
+                self.export_result
+                    .as_ref()
+                    .and_then(|receiver| match receiver.try_recv() {
+                        Ok(result) => Some(result),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            Some(Err("Export worker stopped".into()))
+                        }
+                        Err(_) => None,
+                    });
+            if let Some(result) = export_result {
+                self.export_result = None;
+                match result {
+                    Ok(path) => {
+                        self.status = format!("Exported {}", path.display());
+                        self.error = None;
+                    }
+                    Err(error) => {
+                        self.status = "Export failed".into();
+                        self.error = Some(error);
+                    }
+                }
+            }
+            let chosen = self.native_dialog.as_ref().and_then(|(open, receiver)| {
+                match receiver.try_recv() {
+                    Ok(path) => Some((*open, path)),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((*open, None)),
+                    Err(_) => None,
+                }
+            });
+            if let Some((open, path)) = chosen {
+                self.native_dialog = None;
+                if let Some(mut path) = path {
+                    if !open && path.extension().and_then(|x| x.to_str()) != Some("con") {
+                        path.set_extension("con");
+                    }
+                    self.path = cx.new(|cx| TextInput::new(&path.display().to_string(), cx));
+                    if open {
+                        self.open(cx);
+                    } else {
+                        self.save(cx);
+                        if self.error.is_none() {
+                            self.finish_close(window, cx);
+                        }
+                    }
+                }
+            }
             if let Some(result) = self.worker.poll()
                 && result.revision == self.revision
             {
-                self.evaluated_features = result.features;
-                match result.solution {
-                    Ok(solution) if result.sketch != self.design.current_sketch_id() => {
-                        self.solved.clear();
-                        self.point_dof.clear();
-                        self.conflicts = solution.conflicts;
-                        self.status = "Construction preview".into();
-                    }
-                    Ok(solution) => {
-                        self.point_dof = solution.point_dof;
-                        self.solved = solution.points;
-                        self.status = if self.design.points.is_empty() {
-                            "Ready".into()
-                        } else if solution.conflicts.is_empty() {
-                            if solution.dof == 0 {
-                                "Fully constrained".into()
-                            } else {
-                                format!("{} DOF", solution.dof)
-                            }
-                        } else {
-                            format!("{} conflicting constraints", solution.conflicts.len())
-                        };
-                        if solution.conflicts.is_empty() && !solution.redundant.is_empty() {
-                            self.status
-                                .push_str(&format!(" · {} redundant", solution.redundant.len()));
-                        }
-                        self.conflicts = solution.conflicts;
-                    }
-                    Err(e) => self.error = Some(e),
-                }
-                match result.mesh {
-                    Ok(Some(mesh)) => {
-                        self.face_anchors = mesh.anchors;
-                        self.volume = Some(mesh.volume);
-                        self.mesh = Some((
-                            mesh.vertices
+                if let Err(error) = &result.solution {
+                    self.status = "Evaluation failed".into();
+                    self.error = Some(error.clone());
+                } else {
+                    self.evaluated_features = result.features;
+                    let frames: Vec<_> = result
+                        .mesh
+                        .as_ref()
+                        .ok()
+                        .and_then(|m| m.as_ref())
+                        .map_or_else(Vec::new, |m| {
+                            m.planes
                                 .iter()
-                                .map(|v| DemoVertex {
-                                    position: [
-                                        (v.x * 25.) as f32,
-                                        (v.y * 25.) as f32,
-                                        (v.z * 25.) as f32,
-                                    ],
-                                    normal: [v.nx as f32, v.ny as f32, v.nz as f32],
-                                    face: v.face,
-                                })
-                                .collect(),
-                            mesh.indices,
-                        ));
-                        self.refresh_mesh();
-                        if self.fit_pending {
-                            self.fit();
-                        }
+                                .map(crate::sketch::workplane::Workplane::from)
+                                .collect()
+                        });
+                    self.world_sketches = result
+                        .sketches
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (id, design))| {
+                            (id, design, frames.get(index).copied().unwrap_or_default())
+                        })
+                        .collect();
+                    if self.align_sketch_pending && self.sketch {
+                        self.align_to_sketch();
                     }
-                    Ok(None) => {}
-                    Err(e) => self.error = Some(e),
+                    match result.solution {
+                        Ok(solution) if result.sketch != self.design.current_sketch_id() => {
+                            self.solved.clear();
+                            self.point_dof.clear();
+                            self.conflicts = solution.conflicts;
+                            self.status = "Construction preview".into();
+                        }
+                        Ok(solution) => {
+                            self.point_dof = solution.point_dof;
+                            self.solved = solution.points;
+                            self.status = if self.design.points.is_empty() {
+                                "Ready".into()
+                            } else if solution.conflicts.is_empty() {
+                                if solution.dof == 0 {
+                                    "Fully constrained".into()
+                                } else {
+                                    format!("{} DOF", solution.dof)
+                                }
+                            } else {
+                                format!("{} conflicting constraints", solution.conflicts.len())
+                            };
+                            if solution.conflicts.is_empty() && !solution.redundant.is_empty() {
+                                self.status.push_str(&format!(
+                                    " · {} redundant",
+                                    solution.redundant.len()
+                                ));
+                            }
+                            self.conflicts = solution.conflicts;
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
+                    match result.mesh {
+                        Ok(Some(mesh)) => {
+                            self.body_faces = mesh
+                                .bodies
+                                .iter()
+                                .filter_map(|body| {
+                                    self.evaluated_features
+                                        .get(body.body as usize)
+                                        .map(|id| (body.face, (*id, body.part)))
+                                })
+                                .collect();
+                            self.face_anchors = mesh.anchors;
+                            self.volume = Some(mesh.volume);
+                            self.inspection = Some(mesh.inspection);
+                            self.mesh = Some((
+                                mesh.vertices
+                                    .iter()
+                                    .map(|v| DemoVertex {
+                                        position: [
+                                            (v.x * 25.) as f32,
+                                            (v.y * 25.) as f32,
+                                            (v.z * 25.) as f32,
+                                        ],
+                                        normal: [v.nx as f32, v.ny as f32, v.nz as f32],
+                                        face: v.face,
+                                        color: self.face_color(v.face),
+                                    })
+                                    .collect(),
+                                mesh.indices,
+                            ));
+                            self.refresh_mesh();
+                            if self.fit_pending {
+                                self.fit();
+                            }
+                        }
+                        Ok(None) => {
+                            self.mesh = None;
+                            self.body_faces.clear();
+                            self.face_anchors.clear();
+                            self.refresh_mesh();
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
                 }
             }
+            self.frame_rate.tick();
+            if self.inspection_preview
+                && (self.panel != Some(Panel::Inspect)
+                    || !matches!(
+                        self.inspection_action,
+                        Action::SectionAnalysis | Action::CurvatureAnalysis | Action::DraftAnalysis
+                    ))
+            {
+                self.refresh_mesh();
+            }
+            self.gpu.set_grid_frame(if self.sketch {
+                self.active_frame()
+            } else {
+                Default::default()
+            });
             self.gpu.set_grid(
-                self.mode == Mode::Solid && self.grid,
+                self.mode != Mode::Drawing && self.grid,
                 !self.hidden.contains("origin"),
             );
             match self
                 .gpu
                 .draw(&self.camera, self.selected, self.pending_pick.take())
             {
-                Ok(Some(pick)) if pick.revision == self.view_revision => self.selected = pick.face,
+                Ok(Some(pick)) if pick.revision == self.view_revision => {
+                    self.selected = pick.face;
+                    if self.choosing_sketch_face && self.selected != 0 {
+                        self.choosing_sketch_face = false;
+                        self.create_sketch(cx);
+                    }
+                    if matches!(self.panel, Some(Panel::SolidModify | Panel::Materials))
+                        && let Some(body) = self.selected_body()
+                    {
+                        self.solid_editor.target = Some(body);
+                    }
+                }
                 Ok(_) => {}
                 Err(e) => self.error = Some(e),
             }
@@ -3471,7 +4555,7 @@ mod implementation {
                 .flex_col()
                 .bg(rgb(t::VIEWPORT))
                 .text_color(rgb(t::TEXT))
-                .font_family("sans-serif")
+                .font_family(self.ui_font_family.clone())
                 .text_size(px(14.))
                 .track_focus(&self.focus)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -3511,6 +4595,7 @@ mod implementation {
                         .child(div().text_color(rgb(t::MUTED)).child("mm")),
                 )
                 .children(menu)
+                .children(self.close_confirmation(cx))
         }
     }
 }

@@ -381,3 +381,37 @@ fn failed_sketch_creation_preserves_current_intent() {
     );
     assert_eq!(serde_json::to_value(d).unwrap(), before);
 }
+
+#[cfg(all(feature = "solver", feature = "kernel"))]
+#[test]
+fn cut_and_new_body_preserves_removed_material_and_world_planes() {
+    let (mut d, base) = base_design();
+    let cut = add_rectangle(
+        &mut d,
+        SketchPlane::Face {
+            support: base,
+            producer: base,
+            role: CapRole::End,
+        },
+        ExtrudeOperation::CutNewBody,
+        Some(base),
+        ("pocketDepth", "3 mm"),
+        [0.01, 0.01],
+        [0.03, 0.02],
+    );
+    let model = confusion::evaluation::solid::evaluate(&d, || false).unwrap();
+    let mesh = model.mesh.unwrap();
+    assert!((mesh.volume - 0.08 * 0.05 * 0.01).abs() < 1e-11);
+    assert_eq!(mesh.inspection.solids, 2);
+    assert!(mesh.bodies.iter().any(|f| f.body == 1 && f.part == 0));
+    assert!(mesh.bodies.iter().any(|f| f.body == 1 && f.part == 1));
+    assert_eq!(model.features[1], cut);
+    assert_eq!(mesh.planes.len(), 2);
+    assert!((mesh.planes[1].oz - 0.01).abs() < 1e-10);
+    assert_eq!(model.sketches.len(), 2);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cut-piece.con");
+    container::save(&path, &d).unwrap();
+    let reopened = container::load(&path).unwrap();
+    assert_eq!(reopened.features[0].operation, ExtrudeOperation::CutNewBody);
+}

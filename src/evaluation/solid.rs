@@ -15,6 +15,7 @@ mod implementation {
     use uuid::Uuid;
     pub struct EvaluatedModel {
         pub solution: nonlinear::Solution,
+        pub sketches: Vec<(Uuid, Design)>,
         pub sketch: Option<Uuid>,
         pub mesh: Option<ffi::Mesh>,
         pub features: Vec<Uuid>,
@@ -29,6 +30,7 @@ mod implementation {
         design.validate()?;
         let parameters = expression::evaluate(&design)?;
         let mut solutions = HashMap::new();
+        let mut sketches = Vec::new();
         for sketch in design
             .construction
             .iter()
@@ -40,6 +42,11 @@ mod implementation {
             let input = design.sketch_input(sketch.id)?;
             let s = nonlinear::solve_cancellable(&input, &parameters, &cancelled)
                 .map_err(|e| format!("{}: {e}", sketch.name))?;
+            let mut display = input;
+            for (point, xy) in display.points.iter_mut().zip(&s.points) {
+                point.xy = *xy;
+            }
+            sketches.push((sketch.id, display));
             solutions.insert(sketch.id, s);
         }
         let solution = if let Some(id) = design.current_sketch_id() {
@@ -51,7 +58,11 @@ mod implementation {
             nonlinear::solve_cancellable(&design, &parameters, &cancelled)?
         };
         let features = design.solid_features();
-        let ids: Vec<_> = features.iter().map(|f| f.id).collect();
+        let ids: Vec<_> = features
+            .iter()
+            .map(|f| f.id)
+            .chain(design.create_features.iter().map(|f| f.id))
+            .collect();
         let index = |id: Uuid| {
             ids.iter()
                 .position(|i| *i == id)
@@ -112,11 +123,65 @@ mod implementation {
                     ExtrudeOperation::NewBody => 0,
                     ExtrudeOperation::Join => 1,
                     ExtrudeOperation::Cut => 2,
+                    ExtrudeOperation::CutNewBody => 3,
                 },
                 target: feature.target.map(&index).transpose()?.unwrap_or(-1),
                 support,
                 producer,
                 role,
+            });
+        }
+        let mut creates = vec![];
+        for feature in &design.create_features {
+            if cancelled() {
+                return Err("Evaluation superseded".into());
+            }
+            let values: Vec<_> = feature.parameters.iter().map(|id| parameters[id]).collect();
+            feature
+                .kind
+                .validate_values(&values)
+                .map_err(|e| format!("{}: {e}", feature.name))?;
+            let mut add_profile =
+                |sketch: Option<Uuid>, boundary: &[Uuid]| -> Result<(u32, u32), String> {
+                    let start = edges.len() as u32;
+                    if let Some(id) = sketch {
+                        if !matches!(design.sketch_plane(id)?, SketchPlane::Xy) {
+                            return Err("Create profiles currently require an XY sketch".into());
+                        }
+                        let input = design.sketch_input(id)?;
+                        let solved = solutions.get(&id).ok_or("Missing profile solution")?;
+                        if !solved.conflicts.is_empty() {
+                            return Err("Resolve profile sketch conflicts first".into());
+                        }
+                        let region = regions::select(&input, &solved.points, boundary)?;
+                        for (wire, w) in region.wires.iter().enumerate() {
+                            for e in w {
+                                edges.push(ffi::ProfileEdge {
+                                    wire: wire as u32,
+                                    sx: e.start[0],
+                                    sy: e.start[1],
+                                    ex: e.end[0],
+                                    ey: e.end[1],
+                                    cx: e.center[0],
+                                    cy: e.center[1],
+                                    sweep: e.sweep,
+                                });
+                            }
+                        }
+                    }
+                    Ok((start, edges.len() as u32 - start))
+                };
+            let (edge_start, edge_count) = add_profile(feature.sketch, &feature.boundary)?;
+            let (second_start, second_count) = add_profile(feature.second_sketch, &[])?;
+            creates.push(ffi::CreateStep {
+                kind: feature.kind as u32,
+                edge_start,
+                edge_count,
+                second_start,
+                second_count,
+                target: feature.target.map(&index).transpose()?.unwrap_or(-1),
+                second_target: feature.second_target.map(&index).transpose()?.unwrap_or(-1),
+                values,
             });
         }
         let mut planes = vec![];
@@ -125,28 +190,65 @@ mod implementation {
             .iter()
             .filter(|f| matches!(f.kind, crate::document::schema::ConstructionKind::Sketch))
         {
-            if let SketchPlane::Face {
+            let (support, producer, role) = match design.sketch_plane(sketch.id)? {
+                SketchPlane::Xy => (-1, -1, 0),
+                SketchPlane::Face {
+                    support,
+                    producer,
+                    role,
+                } => (
+                    index(*support)?,
+                    index(*producer)?,
+                    if *role == CapRole::Start { 1 } else { 2 },
+                ),
+            };
+            planes.push(ffi::FaceRequest {
                 support,
                 producer,
                 role,
-            } = design.sketch_plane(sketch.id)?
-            {
-                planes.push(ffi::FaceRequest {
-                    support: index(*support)?,
-                    producer: index(*producer)?,
-                    role: if *role == CapRole::Start { 1 } else { 2 },
-                });
-            }
+            });
         }
-        let mesh = if steps.is_empty() {
+        let mesh = if steps.is_empty() && creates.is_empty() {
             None
         } else {
-            Some(ffi::evaluate_model(&edges, &steps, &planes).map_err(|e| e.to_string())?)
+            let edits: Vec<_> = design
+                .solid_edits
+                .iter()
+                .map(|e| {
+                    let mut values = e.values;
+                    for (i, id) in e.parameters.iter().enumerate() {
+                        if let Some(id) = id {
+                            values[i] =
+                                *parameters.get(id).ok_or("Missing solid edit parameter")?;
+                        }
+                    }
+                    let mut resolved = e.clone();
+                    resolved.values = values;
+                    resolved.validate()?;
+                    Ok(ffi::ModifyStep {
+                        kind: e.kind.code(),
+                        target: index(e.target)? as u32,
+                        tool: e.tool.map(&index).transpose()?.unwrap_or(-1),
+                        face: e.face,
+                        a: values[0],
+                        b: values[1],
+                        c: values[2],
+                        d: values[3],
+                        copy: e.copy,
+                        mode: e.mode,
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            Some(
+                ffi::evaluate_complete_model(&edges, &steps, &planes, &edits, &creates)
+                    .map_err(|e| e.to_string())?,
+            )
         };
         if cancelled() {
             return Err("Evaluation superseded".into());
         }
         Ok(EvaluatedModel {
+            sketches,
             sketch: design.current_sketch_id(),
             solution,
             mesh,
