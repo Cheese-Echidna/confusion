@@ -12,9 +12,9 @@ The scope is sketches, solids, components/assemblies and technical drawings. The
 application is entirely local: there are no cloud features, CAM, sheet-metal,
 simulation or electronics workbenches.
 
-The repository contains the architecture scaffold and a working planar sketch →
-parametric extrusion workflow. Draw lines or rectangles, apply constraints, edit
-unit-aware parameters, generate an exact OCCT solid, and save/reopen local `.con` files.
+The repository contains the architecture scaffold and a working multi-sketch →
+parametric solid workflow. Draw lines or rectangles, apply constraints, edit
+unit-aware parameters, generate exact OCCT solids with joins and cuts, and save/reopen local `.con` files.
 
 On NixOS:
 
@@ -35,7 +35,7 @@ to add driving dimensions, constraint tools to define relationships, and **I** t
 measure selections. Drag points and lines to edit under constraints. The sketch
 menus also include arcs, ellipses, splines, slots, trim, offset, and transforms.
 Press **E** to extrude a closed line, circle, or arc region, including holes. Select a boundary curve first when choosing among multiple regions. Open and Save use a local
-path editor. Ellipse/spline extrusion and complete Fusion parity remain unfinished.
+path editor. Select a planar extrusion cap, choose **Create sketch**, then extrude with **Cut** to create a face-attached pocket. Ellipse/spline extrusion and complete Fusion parity remain unfinished.
 See the [UI guide](docs/user-interface.md) and
 [workflow guide](docs/parametric-workflow.md) for controls and current limits.
 

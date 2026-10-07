@@ -13,13 +13,14 @@ mod implementation {
         scene::DemoVertex,
     };
     use crate::ui::{
-        components::{button, icon, separator},
+        components::{button, icon, separator, text_button},
         sketch_canvas::SketchCanvas,
         theme as t,
         toolbar::{self, Action, Feature, Mode},
         view_cube,
     };
     use crate::{
+        document::model::{CapRole, ExtrudeFeature, ExtrudeOperation, SketchPlane},
         document::schema::{ConstraintKind, ConstructionKind, Design, Extrusion},
         runtime::worker::Worker,
         ui::text_input::TextInput,
@@ -94,6 +95,12 @@ mod implementation {
         camera: Camera,
         view_revision: u64,
         selected: u32,
+        face_anchors: Vec<crate::kernel::bridge::ffi::FaceAnchor>,
+        evaluated_features: Vec<Uuid>,
+        extrude_operation: ExtrudeOperation,
+        extrude_target: Option<Uuid>,
+        editing_feature: Option<Uuid>,
+        fit_pending: bool,
         pending_pick: Option<([f64; 2], u64)>,
         bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
         drag: Option<Drag>,
@@ -159,6 +166,9 @@ mod implementation {
         show_constraints: bool,
         show_dimensions: bool,
         dimension_drag: Option<(Uuid, Design, bool)>,
+        editor_input: Option<EntityId>,
+        search_index: usize,
+        search_query: String,
     }
 
     include!("sketch_workflow.rs");
@@ -175,6 +185,12 @@ mod implementation {
                 camera: Camera::default(),
                 view_revision: 0,
                 selected: 0,
+                face_anchors: vec![],
+                evaluated_features: vec![],
+                extrude_operation: ExtrudeOperation::NewBody,
+                extrude_target: None,
+                editing_feature: None,
+                fit_pending: false,
                 pending_pick: None,
                 bounds: Rc::new(Cell::new(None)),
                 drag: None,
@@ -252,7 +268,7 @@ mod implementation {
                 reference_dimension: false,
                 dimension_edit: None,
                 dimension_position: None,
-                search: cx.new(|cx| TextInput::new("", cx)),
+                search: cx.new(|cx| TextInput::new("", cx).with_placeholder("Search tools")),
                 tool_points: vec![],
                 transform_action: Action::Move,
                 transform_x: cx.new(|cx| TextInput::new("10 mm", cx)),
@@ -265,6 +281,9 @@ mod implementation {
                 show_constraints: true,
                 show_dimensions: true,
                 dimension_drag: None,
+                editor_input: None,
+                search_index: 0,
+                search_query: String::new(),
             }
         }
 
@@ -307,34 +326,30 @@ mod implementation {
                             * 0.8;
                     }
                 }
-            } else {
-                let coords = if self.solved.is_empty() {
-                    self.design.points.iter().map(|p| p.xy).collect()
-                } else {
-                    self.solved.clone()
-                };
-                if !coords.is_empty() {
-                    let min = [
-                        coords.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
-                        coords.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
-                    ];
-                    let max = [
-                        coords
-                            .iter()
-                            .map(|p| p[0])
-                            .fold(f64::NEG_INFINITY, f64::max),
-                        coords
-                            .iter()
-                            .map(|p| p[1])
-                            .fold(f64::NEG_INFINITY, f64::max),
-                    ];
+            } else if let Some((vertices, _)) = &self.mesh {
+                if !vertices.is_empty() {
+                    let mut min = [f64::INFINITY; 3];
+                    let mut max = [f64::NEG_INFINITY; 3];
+                    for v in vertices {
+                        for k in 0..3 {
+                            min[k] = min[k].min(v.position[k] as f64);
+                            max[k] = max[k].max(v.position[k] as f64);
+                        }
+                    }
                     self.camera.target = nalgebra::Point3::new(
-                        (min[0] + max[0]) * 12.5,
-                        (min[1] + max[1]) * 12.5,
-                        0.,
+                        (min[0] + max[0]) * 0.5,
+                        (min[1] + max[1]) * 0.5,
+                        (min[2] + max[2]) * 0.5,
                     );
-                    self.camera.distance = ((max[0] - min[0]).hypot(max[1] - min[1]) * 70.).max(3.);
+                    let diagonal = ((max[0] - min[0]).powi(2)
+                        + (max[1] - min[1]).powi(2)
+                        + (max[2] - min[2]).powi(2))
+                    .sqrt();
+                    self.camera.distance = (diagonal * 2.).max(0.1);
+                    self.fit_pending = false;
                 }
+            } else {
+                self.fit_pending = true;
             }
             self.changed_camera();
         }
@@ -349,6 +364,8 @@ mod implementation {
             self.revision = self.revision.wrapping_add(1);
             self.changed_camera();
             self.selected = 0;
+            self.face_anchors.clear();
+            self.evaluated_features.clear();
             self.volume = None;
             self.conflicts.clear();
             self.gpu.set_mesh(&[], &[]);
@@ -378,30 +395,155 @@ mod implementation {
                 .retain(|(id, _)| self.design.parameters.iter().any(|p| p.id == *id));
             cx.notify();
         }
-        fn extrude(&mut self, cx: &mut Context<Self>) {
-            let xy: Vec<_> = if self.solved.len() == self.design.points.len() {
-                self.solved.clone()
-            } else {
-                self.design.points.iter().map(|p| p.xy).collect()
-            };
-            let region = crate::sketch::regions::regions(&self.design, &xy).and_then(|regions| {
-                let selected: Vec<_> = regions
+        fn open_extrude(&mut self, cx: &mut Context<Self>) {
+            self.editing_feature = self
+                .design
+                .solid_features()
+                .iter()
+                .find(|f| Some(f.sketch) == self.design.current_sketch_id())
+                .map(|f| f.id);
+            if let Some(feature) = self
+                .design
+                .solid_features()
+                .iter()
+                .find(|f| Some(f.id) == self.editing_feature)
+            {
+                self.extrude_operation = feature.operation;
+                self.extrude_target = feature.target;
+                if let Some(p) = self
+                    .design
+                    .parameters
                     .iter()
-                    .filter(|r| r.boundary.iter().any(|id| self.selection.contains(id)))
-                    .collect();
-                if selected.len() == 1 {
-                    Ok(selected[0].clone())
-                } else if selected.is_empty() {
-                    let boundary = self
-                        .design
-                        .extrusion
-                        .as_ref()
-                        .map_or(&[][..], |e| e.boundary.as_slice());
-                    crate::sketch::regions::select(&self.design, &xy, boundary)
-                } else {
-                    Err("Select a boundary curve from one region before extruding".into())
+                    .find(|p| p.id == feature.depth)
+                {
+                    let text = p.expression.clone();
+                    self.depth = cx.new(|cx| TextInput::new(&text, cx));
                 }
-            });
+            } else {
+                self.extrude_operation =
+                    if matches!(self.design.active_plane, SketchPlane::Face { .. }) {
+                        ExtrudeOperation::Cut
+                    } else {
+                        ExtrudeOperation::NewBody
+                    };
+                self.extrude_target = match self.design.active_plane {
+                    SketchPlane::Face { support, .. } => Some(support),
+                    _ => self.design.latest_body_feature(),
+                };
+                self.depth = cx.new(|cx| TextInput::new("5 mm", cx));
+            }
+            self.panel = Some(Panel::Extrude);
+        }
+        fn create_sketch(&mut self, cx: &mut Context<Self>) {
+            let plane = if self.selected != 0 {
+                let anchors: Vec<_> = self
+                    .face_anchors
+                    .iter()
+                    .filter(|a| a.face == self.selected)
+                    .collect();
+                if anchors.len() != 1 || anchors[0].ambiguous {
+                    self.error = Some(
+                        "Select an unambiguous planar extrusion cap to create a sketch".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
+                let a = anchors[0];
+                SketchPlane::Face {
+                    support: self.evaluated_features[a.support as usize],
+                    producer: self.evaluated_features[a.producer as usize],
+                    role: if a.role == 1 {
+                        CapRole::Start
+                    } else {
+                        CapRole::End
+                    },
+                }
+            } else {
+                SketchPlane::Xy
+            };
+            let mut candidate = self.design.clone();
+            if candidate.current_sketch_id().is_none()
+                || (candidate.points.is_empty()
+                    && candidate.extrusion.is_none()
+                    && candidate.features.is_empty())
+            {
+                candidate.ensure_sketch();
+            } else if let Err(e) = candidate.create_sketch(plane) {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+            if let Err(e) = candidate.validate() {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+            self.checkpoint();
+            self.design = candidate;
+            self.solved.clear();
+            self.selection.clear();
+            self.editing_feature = None;
+            self.set_mode(Mode::Sketch, cx);
+            self.panel = None;
+            self.status = match self.design.active_plane {
+                SketchPlane::Xy => "Sketch on XY plane".into(),
+                SketchPlane::Face { .. } => "Sketch on selected face".into(),
+            };
+        }
+        fn extrude(&mut self, cx: &mut Context<Self>) {
+            let mut candidate = self.design.clone();
+            let sketch = candidate.ensure_sketch();
+            let input = match candidate.sketch_input(sketch) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
+                    return;
+                }
+            };
+            let parameters = match crate::parameters::expression::evaluate(&candidate) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
+                    return;
+                }
+            };
+            let solution = match crate::solver::nonlinear::solve(&input, &parameters) {
+                Ok(s) if s.conflicts.is_empty() => s,
+                Ok(_) => {
+                    self.error = Some("Resolve sketch conflicts before extruding".into());
+                    cx.notify();
+                    return;
+                }
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
+                    return;
+                }
+            };
+            let existing = candidate
+                .solid_features()
+                .into_iter()
+                .find(|f| Some(f.id) == self.editing_feature);
+            let region =
+                crate::sketch::regions::regions(&input, &solution.points).and_then(|regions| {
+                    let selected: Vec<_> = regions
+                        .iter()
+                        .filter(|r| r.boundary.iter().any(|id| self.selection.contains(id)))
+                        .collect();
+                    if selected.len() == 1 {
+                        Ok(selected[0].clone())
+                    } else if selected.is_empty() {
+                        crate::sketch::regions::select(
+                            &input,
+                            &solution.points,
+                            existing.as_ref().map_or(&[][..], |e| e.boundary.as_slice()),
+                        )
+                    } else {
+                        Err("Select a boundary curve from one region before extruding".into())
+                    }
+                });
             let region = match region {
                 Ok(r) => r,
                 Err(e) => {
@@ -410,27 +552,93 @@ mod implementation {
                     return;
                 }
             };
-            self.checkpoint();
             let expression =
                 crate::parameters::expression::dimension_input(&self.depth.read(cx).content, false);
-            let depth = self.design.parameter("depth", expression);
-            self.inputs.retain(|(id, _)| *id != depth);
-            if let Some(e) = &mut self.design.extrusion {
-                e.depth = depth;
-                e.boundary = region.boundary.clone();
+            let depth = if let Some(e) = &existing {
+                candidate
+                    .parameters
+                    .iter_mut()
+                    .find(|p| p.id == e.depth)
+                    .unwrap()
+                    .expression = expression;
+                e.depth
             } else {
-                self.design.extrusion = Some(Extrusion {
-                    boundary: region.boundary,
+                let mut n = candidate.solid_features().len() + 1;
+                while candidate
+                    .parameters
+                    .iter()
+                    .any(|p| p.name == format!("depth{n}"))
+                {
+                    n += 1;
+                }
+                candidate.parameter(&format!("depth{n}"), expression)
+            };
+            let target = if self.extrude_operation == ExtrudeOperation::NewBody {
+                None
+            } else {
+                self.extrude_target
+            };
+            if existing
+                .as_ref()
+                .is_some_and(|e| candidate.extrusion.as_ref().is_some_and(|b| b.id == e.id))
+            {
+                if self.extrude_operation != ExtrudeOperation::NewBody {
+                    self.error = Some("The first extrusion creates a new body".into());
+                    cx.notify();
+                    return;
+                }
+                let e = candidate.extrusion.as_mut().unwrap();
+                e.depth = depth;
+                e.boundary = region.boundary;
+            } else if candidate.extrusion.is_none()
+                && candidate.features.is_empty()
+                && candidate.primary_sketch_id() == Some(sketch)
+                && self.extrude_operation == ExtrudeOperation::NewBody
+            {
+                candidate.extrusion = Some(Extrusion {
                     id: Uuid::new_v4(),
                     depth,
+                    boundary: region.boundary,
                 });
+            } else {
+                let feature = ExtrudeFeature {
+                    id: existing.as_ref().map_or_else(Uuid::new_v4, |e| e.id),
+                    name: existing.as_ref().map_or_else(
+                        || format!("Extrude {}", candidate.solid_features().len() + 1),
+                        |e| e.name.clone(),
+                    ),
+                    sketch,
+                    boundary: region.boundary,
+                    depth,
+                    operation: self.extrude_operation,
+                    target,
+                };
+                if let Some(index) = candidate.features.iter().position(|f| f.id == feature.id) {
+                    candidate.features[index] = feature;
+                } else {
+                    candidate.features.push(feature);
+                }
             }
+            candidate.sync_construction();
+            if let Err(e) = candidate
+                .validate()
+                .and_then(|_| crate::parameters::expression::evaluate(&candidate).map(|_| ()))
+            {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+            self.checkpoint();
+            self.design = candidate;
+            self.inputs.retain(|(id, _)| *id != depth);
             self.sketch = false;
             self.mode = Mode::Solid;
+            self.panel = None;
             self.construction_cursor = None;
             self.before_construction = false;
             self.anchor = None;
             self.tool = Tool::Select;
+            self.editing_feature = None;
             self.rebuild(cx);
             self.fit();
         }
@@ -627,6 +835,7 @@ mod implementation {
             }
         }
         fn feature(&mut self, feature: Feature, window: &mut Window, cx: &mut Context<Self>) {
+            self.error = None;
             self.menu = None;
             window.focus(&self.focus);
             let Some(action) = feature.action else {
@@ -635,14 +844,7 @@ mod implementation {
                 return;
             };
             match action {
-                Action::Sketch => {
-                    self.set_mode(Mode::Sketch, cx);
-                    if self.design.construction.is_empty() {
-                        self.checkpoint();
-                        self.design.ensure_sketch();
-                        self.rebuild(cx);
-                    }
-                }
+                Action::Sketch => self.create_sketch(cx),
                 Action::Line
                 | Action::Rectangle
                 | Action::Circle
@@ -689,11 +891,12 @@ mod implementation {
                     self.anchor = None;
                 }
                 Action::Parameters => self.panel = Some(Panel::Parameters),
-                Action::Extrude => self.panel = Some(Panel::Extrude),
+                Action::Extrude => self.open_extrude(cx),
                 Action::Dimension => {
                     self.panel = Some(Panel::Dimension);
                     self.tool = Tool::Dimension;
                     self.dimension_edit = None;
+                    self.dimension_position = None;
                     self.anchor = None;
                 }
                 Action::Measure => {
@@ -747,7 +950,7 @@ mod implementation {
                 | Action::ViewTop
                 | Action::ViewBottom => {
                     if self.sketch {
-                        self.status = "Sketch view is locked to XY".into();
+                        self.status = "Sketch view is locked to its local plane".into();
                     } else {
                         use nalgebra::Vector3;
                         let (direction, up) = match action {
@@ -767,6 +970,11 @@ mod implementation {
                     self.fit();
                 }
             }
+            if self.panel != Some(Panel::Dimension)
+                && let Some(input) = self.panel_fields().first()
+            {
+                input.update(cx, |input, cx| input.focus_and_select(window, cx));
+            }
             cx.notify();
         }
         fn restore_edit(&mut self, cx: &mut Context<Self>) {
@@ -776,6 +984,8 @@ mod implementation {
             self.anchor = None;
             self.construction_cursor = None;
             self.before_construction = false;
+            self.editing_feature = None;
+            self.selection.clear();
             self.depth = cx.new(|cx| {
                 TextInput::new(
                     self.design
@@ -812,6 +1022,22 @@ mod implementation {
             let kind = id
                 .and_then(|id| self.design.construction.iter().find(|f| f.id == id))
                 .map(|f| f.kind.clone());
+            if edit {
+                let sketch = match kind {
+                    Some(ConstructionKind::Sketch) => id,
+                    Some(ConstructionKind::Extrude { sketch }) => Some(sketch),
+                    _ => None,
+                };
+                if let Some(sketch) = sketch {
+                    if let Err(e) = self.design.activate_sketch(sketch) {
+                        self.error = Some(e);
+                        cx.notify();
+                        return;
+                    }
+                    self.solved.clear();
+                    self.selection.clear();
+                }
+            }
             self.mode = if matches!(kind, Some(ConstructionKind::Sketch)) {
                 Mode::Sketch
             } else {
@@ -827,17 +1053,220 @@ mod implementation {
             } else {
                 None
             };
+            if edit && !self.sketch {
+                self.open_extrude(cx);
+                self.editing_feature = id;
+                if let Some(feature) = self
+                    .design
+                    .solid_features()
+                    .iter()
+                    .find(|f| Some(f.id) == id)
+                {
+                    self.extrude_operation = feature.operation;
+                    self.extrude_target = feature.target;
+                    if let Some(p) = self
+                        .design
+                        .parameters
+                        .iter()
+                        .find(|p| p.id == feature.depth)
+                    {
+                        let text = p.expression.clone();
+                        self.depth = cx.new(|cx| TextInput::new(&text, cx));
+                    }
+                }
+            }
             self.rebuild(cx);
         }
-        fn keyboard(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-            if event.keystroke.key == "enter"
-                && self.panel == Some(Panel::Dimension)
-                && self.dimension.read(cx).focus_handle(cx).is_focused(window)
-            {
-                self.apply_dimension(cx);
+        fn apply_parameters(&mut self, cx: &mut Context<Self>) {
+            let mut candidate = self.display_design();
+            for (id, input) in &self.inputs {
+                if let Some(parameter) = candidate.parameters.iter_mut().find(|p| p.id == *id) {
+                    parameter.expression = input.read(cx).content.to_string();
+                }
+            }
+            self.commit_sketch(candidate, cx);
+        }
+        fn apply_offset_or_fillet(&mut self, fillet: bool, cx: &mut Context<Self>) {
+            let mut candidate = self.display_design();
+            let mut parameters = Design::default();
+            let id = parameters.parameter("distance", self.dimension.read(cx).content.to_string());
+            let result = crate::parameters::expression::evaluate(&parameters).and_then(|values| {
+                if fillet {
+                    crate::sketch::edit::fillet(&mut candidate, &self.selection, values[&id])
+                } else {
+                    crate::sketch::edit::offset(&mut candidate, &self.selection, values[&id])
+                }
+            });
+            match result {
+                Ok(()) => {
+                    self.commit_sketch(candidate, cx);
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+        fn panel_fields(&self) -> Vec<Entity<TextInput>> {
+            match self.panel {
+                Some(Panel::Extrude) => vec![self.depth.clone()],
+                Some(Panel::Dimension | Panel::Offset | Panel::Fillet) => {
+                    vec![self.dimension.clone()]
+                }
+                Some(Panel::Document) => vec![self.path.clone()],
+                Some(Panel::Search) => vec![self.search.clone()],
+                Some(Panel::Parameters) => {
+                    self.inputs.iter().map(|(_, input)| input.clone()).collect()
+                }
+                Some(Panel::Transform) => {
+                    let mut fields = Vec::new();
+                    if matches!(
+                        self.transform_action,
+                        Action::Move | Action::RectangularPattern
+                    ) {
+                        fields.extend([self.transform_x.clone(), self.transform_y.clone()]);
+                    }
+                    if matches!(
+                        self.transform_action,
+                        Action::Move | Action::CircularPattern
+                    ) {
+                        fields.push(self.transform_angle.clone());
+                    }
+                    if matches!(
+                        self.transform_action,
+                        Action::Scale | Action::RectangularPattern | Action::CircularPattern
+                    ) {
+                        fields.push(self.transform_count.clone());
+                    }
+                    if self.transform_action == Action::RectangularPattern {
+                        fields.push(self.transform_rows.clone());
+                    }
+                    fields
+                }
+                _ => vec![],
+            }
+        }
+        fn confirm_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.error = None;
+            match self.panel {
+                Some(Panel::Dimension) => self.apply_dimension(cx),
+                Some(Panel::Extrude) => {
+                    let mut preview = Design {
+                        parameters: self.design.parameters.clone(),
+                        ..Design::default()
+                    };
+                    let expression = crate::parameters::expression::dimension_input(
+                        &self.depth.read(cx).content,
+                        false,
+                    );
+                    let id = preview.parameter("depth_preview", expression);
+                    let result =
+                        crate::parameters::expression::evaluate(&preview).and_then(|values| {
+                            let depth = values[&id];
+                            if depth.is_finite() && depth > 1e-7 && depth <= 1000. {
+                                Ok(())
+                            } else {
+                                Err("Enter a positive depth within the modeling limits".into())
+                            }
+                        });
+                    if let Err(error) = result {
+                        self.error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                    self.extrude(cx);
+                }
+                Some(Panel::Transform) => self.apply_transform(cx),
+                Some(Panel::Parameters) => self.apply_parameters(cx),
+                Some(Panel::Offset) => self.apply_offset_or_fillet(false, cx),
+                Some(Panel::Fillet) => self.apply_offset_or_fillet(true, cx),
+                Some(Panel::Document) => {
+                    if self.file_open {
+                        self.open(cx);
+                    } else {
+                        self.save(cx);
+                    }
+                }
+                _ => return,
+            }
+            if self.error.is_none() {
+                self.panel = None;
                 window.focus(&self.focus);
-                cx.stop_propagation();
-                return;
+            }
+            cx.notify();
+        }
+        fn keyboard(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+            if self.panel == Some(Panel::Search) {
+                let query = self.search.read(cx).content.to_lowercase();
+                let matches: Vec<_> = toolbar::groups(self.mode)
+                    .into_iter()
+                    .flat_map(|group| group.features)
+                    .filter(|feature| {
+                        feature.available() && feature.name.to_lowercase().contains(&query)
+                    })
+                    .copied()
+                    .collect();
+                if query != self.search_query {
+                    self.search_query = query;
+                    self.search_index = 0;
+                }
+                match event.keystroke.key.as_str() {
+                    "up" | "down" => {
+                        if !matches.is_empty() {
+                            self.search_index = if event.keystroke.key == "up" {
+                                (self.search_index + matches.len() - 1) % matches.len()
+                            } else {
+                                (self.search_index + 1) % matches.len()
+                            };
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    "enter" => {
+                        if let Some(feature) = matches.get(self.search_index).copied() {
+                            self.panel = None;
+                            self.feature(feature, window, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if self.panel.is_some() {
+                if event.keystroke.key == "escape" {
+                    self.error = None;
+                    self.panel = None;
+                    self.dimension_edit = None;
+                    window.focus(&self.focus);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                if event.keystroke.key == "tab" {
+                    let fields = self.panel_fields();
+                    if !fields.is_empty() {
+                        let current = fields
+                            .iter()
+                            .position(|field| field.read(cx).focus_handle(cx).is_focused(window));
+                        let next = match current {
+                            Some(i) if event.keystroke.modifiers.shift => {
+                                (i + fields.len() - 1) % fields.len()
+                            }
+                            Some(i) => (i + 1) % fields.len(),
+                            None if event.keystroke.modifiers.shift => fields.len() - 1,
+                            None => 0,
+                        };
+                        fields[next].update(cx, |input, cx| input.focus_and_select(window, cx));
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                if event.keystroke.key == "enter" {
+                    self.confirm_editor(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
             }
             if event.keystroke.key == "enter"
                 && self.tool == Tool::Spline
@@ -1094,7 +1523,7 @@ mod implementation {
                     .rounded_sm()
                     .cursor_pointer()
                     .child(self.mode.label())
-                    .child(icon("down", 16., t::TEXT))
+                    .child(div().text_color(rgb(t::MUTED)).child("▾"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.menu_x = 12.;
                         this.menu = Some("Workspace");
@@ -1139,7 +1568,7 @@ mod implementation {
                         .rounded_sm()
                         .hover(|s| s.bg(rgb(t::HOVER)))
                         .child(name)
-                        .child(icon("down", 12., t::MUTED))
+                        .child(div().text_color(rgb(t::MUTED)).child("▾"))
                         .tooltip(move |_, cx| cx.new(|_| GroupTip(name)).into())
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.menu_x = (f64::from(event.position().x) as f32 - 48.).clamp(
@@ -1166,11 +1595,6 @@ mod implementation {
                 .flex_none()
                 .flex()
                 .flex_col()
-                .bg(rgb(t::PANEL))
-                .border_1()
-                .border_color(rgb(t::BORDER))
-                .rounded_md()
-                .occlude()
                 .absolute()
                 .top(px(16.))
                 .left(px(16.))
@@ -1194,8 +1618,6 @@ mod implementation {
                     .items_center()
                     .px_3()
                     .gap_2()
-                    .border_b_1()
-                    .border_color(rgb(t::BORDER))
                     .child(icon("create_block", 16., t::MUTED))
                     .child(self.document_name(cx)),
             );
@@ -1216,43 +1638,38 @@ mod implementation {
                 let expanded = self.expanded.contains(key);
                 let hidden = self.hidden.contains(key);
                 let mut category = div()
-                    .h(px(36.))
+                    .id(SharedString::from(format!("branch-{key}")))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(t::HOVER)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(key) {
+                            this.expanded.insert(key);
+                        }
+                        cx.notify();
+                    }))
+                    .h(px(28.))
                     .flex()
                     .items_center()
                     .px_2()
                     .gap_2()
                     .child(
-                        button(
-                            SharedString::from(format!("expand-{label}")),
-                            if expanded {
-                                "down"
-                            } else {
-                                "dockwidgets_right"
-                            },
-                            &format!("{} {label}", if expanded { "Collapse" } else { "Expand" }),
-                            false,
-                            true,
-                        )
-                        .size(px(28.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.expanded.remove(key) {
-                                this.expanded.insert(key);
-                            }
-                            cx.notify();
-                        })),
+                        div()
+                            .w(px(14.))
+                            .text_color(rgb(t::MUTED))
+                            .child(if expanded { "▾" } else { "▸" }),
                     )
                     .child(icon(image, 16., t::MUTED))
                     .child(div().flex_1().child(label))
                     .child(
-                        button(
+                        text_button(
                             SharedString::from(format!("visibility-{label}")),
-                            if hidden { "invisible" } else { "visible" },
+                            if hidden { "○" } else { "●" },
                             &format!("{} {label}", if hidden { "Show" } else { "Hide" }),
-                            false,
-                            true,
                         )
-                        .size(px(30.))
+                        .size(px(24.))
+                        .bg(rgba(0))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
                             if !this.hidden.remove(key) {
                                 this.hidden.insert(key);
                             }
@@ -1280,7 +1697,8 @@ mod implementation {
                                         SharedString::from(format!("sketch-{id}")),
                                         "line_rectangle",
                                         &f.name,
-                                        self.mode == Mode::Sketch,
+                                        self.mode == Mode::Sketch
+                                            && self.design.current_sketch_id() == Some(id),
                                     )
                                     .on_click(cx.listener(
                                         move |this, _, window, cx| {
@@ -1292,14 +1710,17 @@ mod implementation {
                             }
                         }
                         "bodies" => {
-                            if let Some(e) = &self.design.extrusion {
+                            let features = self.design.solid_features();
+                            for e in features.iter().filter(|e| {
+                                !features.iter().any(|other| other.target == Some(e.id))
+                            }) {
                                 let id = e.id;
                                 rows = rows.child(
                                     tree_item(
-                                        "body-1",
+                                        SharedString::from(format!("body-{id}")),
                                         "create_block",
-                                        "Body 1",
-                                        self.panel == Some(Panel::Extrude),
+                                        &e.name,
+                                        self.construction_cursor == Some(id),
                                     )
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
@@ -1355,14 +1776,107 @@ mod implementation {
         }
         fn inspector(&self, cx: &mut Context<Self>) -> Option<Div> {
             let panel = self.panel?;
+            if panel == Panel::Dimension
+                && self.dimension_position.is_none()
+                && self.dimension_edit.is_none()
+            {
+                return None;
+            }
             let mut body = div()
                 .w(px(270.))
                 .flex_none()
                 .flex()
                 .flex_col()
                 .bg(rgb(t::PANEL))
-                .border_l_1()
-                .border_color(rgb(t::BORDER));
+                .border_1()
+                .rounded_md()
+                .border_color(rgb(t::BORDER))
+                .absolute()
+                .top(px(72.))
+                .right(px(100.))
+                .max_h(px(self.bounds.get().map_or(500., |b| {
+                    (f64::from(b.size.height) as f32 - 100.).max(160.)
+                })))
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                )
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                );
+            if panel == Panel::Dimension {
+                let at = self
+                    .dimension_position
+                    .or_else(|| {
+                        self.dimension_edit
+                            .and_then(|id| self.design.dimension_positions.get(&id).copied())
+                    })
+                    .or(self.hover);
+                if let (Some(at), Some(bounds)) = (at, self.bounds.get()) {
+                    let width = f64::from(bounds.size.width) as f32;
+                    let height = f64::from(bounds.size.height) as f32;
+                    let x = width * 0.5 + ((at[0] - self.center[0]) * self.scale) as f32 + 16.;
+                    let y = height * 0.5 - ((at[1] - self.center[1]) * self.scale) as f32 + 16.;
+                    body = body
+                        .right(Length::Auto)
+                        .left(px(x.clamp(8., (width - 198.).max(8.))))
+                        .top(px(y.clamp(8., (height - 112.).max(8.))));
+                }
+                let mut editor = body
+                    .w(px(190.))
+                    .p_2()
+                    .gap_1()
+                    .child(self.dimension.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                text_button(
+                                    "apply-dimension",
+                                    "Apply ↵",
+                                    "Confirm dimension · Enter",
+                                )
+                                .h(px(24.))
+                                .px_1()
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.confirm_editor(window, cx),
+                                )),
+                            )
+                            .child(
+                                text_button(
+                                    "reference-dimension",
+                                    if self.reference_dimension {
+                                        "Driven"
+                                    } else {
+                                        "Driving"
+                                    },
+                                    "Toggle driven reference dimension",
+                                )
+                                .h(px(24.))
+                                .px_1()
+                                .text_color(rgb(t::MUTED))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.reference_dimension = !this.reference_dimension;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    );
+                if let Some(error) = &self.error {
+                    editor = editor.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(t::ERROR))
+                            .child(error.clone()),
+                    );
+                }
+                return Some(editor);
+            }
             let title = match panel {
                 Panel::Document => {
                     if self.file_open {
@@ -1401,8 +1915,10 @@ mod implementation {
                     .child(
                         button("close-panel", "close", "Close panel · Escape", false, true)
                             .size(px(24.))
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.error = None;
                                 this.panel = None;
+                                window.focus(&this.focus);
                                 cx.notify();
                             })),
                     ),
@@ -1427,20 +1943,9 @@ mod implementation {
                                 false,
                                 true,
                             )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if this.file_open {
-                                        this.open(cx);
-                                    } else {
-                                        this.save(cx);
-                                        if this.error.is_none() {
-                                            this.panel = None;
-                                        }
-                                    }
-                                    window.focus(&this.focus);
-                                    cx.notify();
-                                },
-                            )),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.confirm_editor(window, cx)),
+                            ),
                         ),
                     );
                 }
@@ -1498,23 +2003,88 @@ mod implementation {
                     }
                 }
                 Panel::Extrude => {
+                    let mut operations = div().flex().gap_1();
+                    for (operation, label) in [
+                        (ExtrudeOperation::NewBody, "New body"),
+                        (ExtrudeOperation::Join, "Join"),
+                        (ExtrudeOperation::Cut, "Cut"),
+                    ] {
+                        operations = operations.child(
+                            div()
+                                .id(SharedString::from(format!("operation-{label}")))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .bg(rgb(if self.extrude_operation == operation {
+                                    t::SELECTED
+                                } else {
+                                    t::PANEL
+                                }))
+                                .hover(|s| s.bg(rgb(t::HOVER)))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.extrude_operation = operation;
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    content = content.child(operations);
+                    if self.extrude_operation != ExtrudeOperation::NewBody {
+                        content =
+                            content.child(div().text_color(rgb(t::MUTED)).child("Target body"));
+                        let features = self.design.solid_features();
+                        for f in &features {
+                            if Some(f.id) == self.editing_feature
+                                || features.iter().any(|other| {
+                                    other.target == Some(f.id)
+                                        && Some(other.id) != self.editing_feature
+                                })
+                            {
+                                continue;
+                            }
+                            let id = f.id;
+                            content = content.child(
+                                div()
+                                    .id(SharedString::from(format!("target-{id}")))
+                                    .px_2()
+                                    .py_1()
+                                    .cursor_pointer()
+                                    .bg(rgb(if self.extrude_target == Some(id) {
+                                        t::SELECTED
+                                    } else {
+                                        t::PANEL
+                                    }))
+                                    .child(f.name.clone())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.extrude_target = Some(id);
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+                    }
                     content = content
                         .child(div().text_color(rgb(t::MUTED)).child("Depth"))
                         .child(self.depth.clone())
-                        .child(div().flex().justify_end().child(
-                            button("apply-extrude", "up", "Apply extrusion", false, true).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.extrude(cx);
-                                    window.focus(&this.focus);
-                                }),
-                            ),
-                        ))
                         .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(t::MUTED))
-                                .child("New body · XY profile"),
-                        );
+                            div().flex().justify_end().child(
+                                text_button(
+                                    "apply-extrude",
+                                    "Extrude",
+                                    "Confirm extrusion · Enter",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.confirm_editor(window, cx),
+                                )),
+                            ),
+                        )
+                        .child(div().text_size(px(11.)).text_color(rgb(t::MUTED)).child(
+                            if self.extrude_operation == ExtrudeOperation::Cut {
+                                "Cut inward from sketch plane"
+                            } else {
+                                "Extrude outward from sketch plane"
+                            },
+                        ));
                 }
                 Panel::Transform => {
                     let action = self.transform_action;
@@ -1593,12 +2163,10 @@ mod implementation {
                         );
                     }
                     content = content.child(
-                        button("apply-transform", "move_copy", "Apply", false, true).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.apply_transform(cx);
-                                window.focus(&this.focus)
-                            }),
-                        ),
+                        text_button("apply-transform", "Apply", "Confirm transform · Enter")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.confirm_editor(window, cx)),
+                            ),
                     );
                 }
                 Panel::Fillet => {
@@ -1607,58 +2175,47 @@ mod implementation {
                         .child("Radius")
                         .child(self.dimension.clone())
                         .child(
-                            button("apply-fillet", "fillet", "Apply fillet", false, true).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    let mut d = this.display_design();
-                                    let mut parameters = Design::default();
-                                    let id = parameters.parameter(
-                                        "radius",
-                                        this.dimension.read(cx).content.to_string(),
-                                    );
-                                    let result =
-                                        crate::parameters::expression::evaluate(&parameters)
-                                            .and_then(|p| {
-                                                crate::sketch::edit::fillet(
-                                                    &mut d,
-                                                    &this.selection,
-                                                    p[&id],
-                                                )
-                                            });
-                                    match result {
-                                        Ok(()) => {
-                                            this.commit_sketch(d, cx);
-                                        }
-                                        Err(e) => this.error = Some(e),
-                                    }
-                                    window.focus(&this.focus);
-                                    cx.notify();
-                                }),
-                            ),
+                            text_button("apply-fillet", "Apply fillet", "Confirm fillet · Enter")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_editor(window, cx)
+                                })),
                         );
                 }
                 Panel::Search => {
                     content = content.child(self.search.clone());
                     let query = self.search.read(cx).content.to_lowercase();
-                    for group in toolbar::groups(self.mode) {
-                        for feature in group
-                            .features
-                            .iter()
-                            .filter(|f| f.available() && f.name.to_lowercase().contains(&query))
-                        {
-                            let feature = *feature;
-                            content = content.child(
-                                div()
-                                    .id(feature.id)
-                                    .py_2()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(t::HOVER)))
-                                    .child(feature.name)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.panel = None;
-                                        this.feature(feature, window, cx)
-                                    })),
-                            );
-                        }
+                    let selected = if query == self.search_query {
+                        self.search_index
+                    } else {
+                        0
+                    };
+                    let matches: Vec<_> = toolbar::groups(self.mode)
+                        .into_iter()
+                        .flat_map(|group| group.features)
+                        .filter(|feature| {
+                            feature.available() && feature.name.to_lowercase().contains(&query)
+                        })
+                        .copied()
+                        .collect();
+                    for (index, feature) in matches.iter().copied().enumerate() {
+                        content = content.child(
+                            div()
+                                .id(feature.id)
+                                .px_2()
+                                .py_2()
+                                .cursor_pointer()
+                                .when(index == selected, |el| el.bg(rgb(t::SELECTED)))
+                                .hover(|style| style.bg(rgb(t::HOVER)))
+                                .child(feature.name)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.panel = None;
+                                    this.feature(feature, window, cx);
+                                })),
+                        );
+                    }
+                    if matches.is_empty() {
+                        content = content
+                            .child(div().text_color(rgb(t::MUTED)).child("No matching tools"));
                     }
                 }
                 Panel::Measure => {
@@ -1678,81 +2235,13 @@ mod implementation {
                         .child("Offset distance")
                         .child(self.dimension.clone())
                         .child(
-                            button("apply-offset", "offset", "Apply offset", false, true).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    let mut d = this.display_design();
-                                    let mut parameter = Design::default();
-                                    let id = parameter.parameter(
-                                        "offset",
-                                        this.dimension.read(cx).content.to_string(),
-                                    );
-                                    match crate::parameters::expression::evaluate(&parameter)
-                                        .and_then(|p| {
-                                            crate::sketch::edit::offset(
-                                                &mut d,
-                                                &this.selection,
-                                                p[&id],
-                                            )
-                                        }) {
-                                        Ok(()) => {
-                                            this.commit_sketch(d, cx);
-                                        }
-                                        Err(e) => this.error = Some(e),
-                                    }
-                                    window.focus(&this.focus);
-                                    cx.notify();
-                                }),
-                            ),
+                            text_button("apply-offset", "Apply offset", "Confirm offset · Enter")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_editor(window, cx)
+                                })),
                         );
                 }
-                Panel::Dimension => {
-                    content = content
-                        .child(
-                            div()
-                                .text_color(rgb(t::MUTED))
-                                .child("Select geometry, enter a value, then apply"),
-                        )
-                        .child(self.dimension.clone())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    button(
-                                        "reference-dimension",
-                                        "measure",
-                                        "Driven dimension (reference only)",
-                                        self.reference_dimension,
-                                        true,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.reference_dimension = !this.reference_dimension;
-                                            cx.notify()
-                                        },
-                                    )),
-                                )
-                                .child("Driven (reference)"),
-                        )
-                        .child(
-                            div().flex().justify_end().child(
-                                button(
-                                    "apply-dimension",
-                                    "dim_linear",
-                                    "Apply dimension",
-                                    false,
-                                    true,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.apply_constraint(3, cx);
-                                        window.focus(&this.focus);
-                                    },
-                                )),
-                            ),
-                        );
-                }
+                Panel::Dimension => {}
                 Panel::View => {
                     for (id, image, label, enabled) in [
                         ("view-grid", "grid", "Grid", self.grid),
@@ -1819,7 +2308,7 @@ mod implementation {
                     }
                 }
             }
-            if (panel == Panel::Dimension || (panel == Panel::Parameters && self.line.is_some()))
+            if (panel == Panel::Parameters && self.line.is_some())
                 && let Some(line) = self.line
             {
                 let ends = self
@@ -1870,7 +2359,28 @@ mod implementation {
                     }
                 }
             }
-            Some(body.child(content))
+            if let Some(error) = &self.error {
+                content = content.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(t::ERROR))
+                        .child(error.clone()),
+                );
+            }
+            Some(
+                body.child(content).child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_size(px(11.))
+                        .text_color(rgb(t::MUTED))
+                        .child(if panel == Panel::Search {
+                            "↑ ↓: choose tool · Enter: run · Esc: close"
+                        } else {
+                            "Tab: next field · Enter: confirm · Esc: cancel"
+                        }),
+                ),
+            )
         }
         fn cube_camera(&self) -> Camera {
             let mut camera = self.camera.clone();
@@ -1938,7 +2448,8 @@ mod implementation {
                                         if face.label == "Top" {
                                             this.fit();
                                         } else {
-                                            this.status = "Sketch view is locked to XY".into();
+                                            this.status =
+                                                "Sketch view is locked to its local plane".into();
                                         }
                                     } else {
                                         this.camera.set_direction(face.direction, face.up);
@@ -2572,6 +3083,7 @@ mod implementation {
                 )
                 .child(self.browser(cx))
                 .child(self.navigation(cx))
+                .children(self.inspector(cx))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -2756,7 +3268,7 @@ mod implementation {
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .bg(rgb(if selected { t::SELECTED } else { t::PANEL }))
+            .when(selected, |el| el.bg(rgb(t::SELECTED)))
             .hover(|s| s.bg(rgb(t::HOVER)))
             .child(icon(image, 15., t::MUTED))
             .child(label.to_owned())
@@ -2857,6 +3369,7 @@ mod implementation {
             if let Some(result) = self.worker.poll()
                 && result.revision == self.revision
             {
+                self.evaluated_features = result.features;
                 match result.solution {
                     Ok(solution) => {
                         self.point_dof = solution.point_dof;
@@ -2882,6 +3395,7 @@ mod implementation {
                 }
                 match result.mesh {
                     Ok(Some(mesh)) => {
+                        self.face_anchors = mesh.anchors;
                         self.volume = Some(mesh.volume);
                         self.mesh = Some((
                             mesh.vertices
@@ -2899,6 +3413,9 @@ mod implementation {
                             mesh.indices,
                         ));
                         self.refresh_mesh();
+                        if self.fit_pending {
+                            self.fit();
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => self.error = Some(e),
@@ -2916,18 +3433,30 @@ mod implementation {
                 Ok(_) => {}
                 Err(e) => self.error = Some(e),
             }
+            let input = self.panel_fields().first().cloned().filter(|_| {
+                self.panel != Some(Panel::Dimension)
+                    || self.dimension_position.is_some()
+                    || self.dimension_edit.is_some()
+            });
+            if input.as_ref().map(Entity::entity_id) != self.editor_input {
+                self.editor_input = input.as_ref().map(Entity::entity_id);
+                if let Some(input) = input {
+                    // The editor must enter the focus tree before receiving keyboard input.
+                    window.on_next_frame(move |window, cx| {
+                        input.update(cx, |input, cx| input.focus_and_select(window, cx));
+                    });
+                }
+            }
             let entity = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = entity.update(cx, |_, cx| cx.notify());
             });
-            let mut main = div()
+            let main = div()
                 .flex()
                 .flex_1()
                 .min_h_0()
                 .child(self.scene_element(cx));
-            if let Some(inspector) = self.inspector(cx) {
-                main = main.child(inspector);
-            }
+
             let menu = self.menu_overlay(cx);
             div()
                 .size_full()

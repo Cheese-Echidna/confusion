@@ -192,6 +192,15 @@ pub struct ConstructionFeature {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Design {
+    /// The active sketch uses the legacy geometry fields; inactive sketches are stored once here.
+    #[serde(default)]
+    pub sketches: Vec<super::model::SketchDefinition>,
+    #[serde(default)]
+    pub active_sketch: Option<Uuid>,
+    #[serde(default)]
+    pub active_plane: super::model::SketchPlane,
+    #[serde(default)]
+    pub features: Vec<super::model::ExtrudeFeature>,
     pub points: Vec<Point>,
     pub lines: Vec<Line>,
     #[serde(default)]
@@ -214,6 +223,9 @@ pub struct Design {
 }
 impl Design {
     pub fn ensure_sketch(&mut self) -> Uuid {
+        if let Some(id) = self.active_sketch {
+            return id;
+        }
         if let Some(f) = self
             .construction
             .iter()
@@ -232,26 +244,20 @@ impl Design {
         );
         id
     }
-    /// Normalize supported current feature definitions; changing parameters adds no feature.
+    /// Preserve construction dependencies while synchronizing current feature definitions.
     pub fn sync_construction(&mut self) {
-        if !self.lines.is_empty()
-            || !self.circles.is_empty()
-            || !self.ellipses.is_empty()
-            || !self.splines.is_empty()
+        if !self.points.is_empty()
             || self.extrusion.is_some()
+            || !self.features.is_empty()
+            || !self.sketches.is_empty()
         {
             self.ensure_sketch();
         }
-        if let Some(extrusion) = &self.extrusion {
-            let id = extrusion.id;
-            let sketch = self
-                .construction
-                .iter()
-                .find(|f| matches!(f.kind, ConstructionKind::Sketch))
-                .unwrap()
-                .id;
-            self.construction
-                .retain(|f| matches!(f.kind, ConstructionKind::Sketch) || f.id == id);
+        if let Some(e) = &self.extrusion {
+            let id = e.id;
+            let Some(sketch) = self.primary_sketch_id() else {
+                return;
+            };
             if !self.construction.iter().any(|f| f.id == id) {
                 self.construction.push(ConstructionFeature {
                     id,
@@ -259,23 +265,63 @@ impl Design {
                     kind: ConstructionKind::Extrude { sketch },
                 });
             }
-        } else {
-            self.construction
-                .retain(|f| matches!(f.kind, ConstructionKind::Sketch));
         }
+        for e in &self.features {
+            if !self.construction.iter().any(|f| f.id == e.id) {
+                self.construction.push(ConstructionFeature {
+                    id: e.id,
+                    name: e.name.clone(),
+                    kind: ConstructionKind::Extrude { sketch: e.sketch },
+                });
+            }
+        }
+        let ids: std::collections::HashSet<_> =
+            self.solid_features().iter().map(|f| f.id).collect();
+        self.construction
+            .retain(|f| matches!(f.kind, ConstructionKind::Sketch) || ids.contains(&f.id));
     }
-    /// Derived evaluation at a construction marker; canonical downstream intent is retained.
+    /// Evaluate the dependency prefix at a construction marker, retaining canonical intent elsewhere.
     pub fn through_feature(&self, id: Uuid) -> Result<Self, String> {
-        let feature = self
+        let index = self
             .construction
             .iter()
-            .find(|f| f.id == id)
+            .position(|f| f.id == id)
             .ok_or("Missing construction feature")?;
         let mut result = self.clone();
-        if matches!(feature.kind, ConstructionKind::Sketch) {
+        let kept: std::collections::HashSet<_> =
+            self.construction[..=index].iter().map(|f| f.id).collect();
+        result.features.retain(|f| kept.contains(&f.id));
+        if result
+            .extrusion
+            .as_ref()
+            .is_some_and(|e| !kept.contains(&e.id))
+        {
             result.extrusion = None;
-            result.construction.retain(|f| f.id == id);
         }
+        result.sketches.retain(|s| kept.contains(&s.id));
+        if result
+            .current_sketch_id()
+            .is_some_and(|id| !kept.contains(&id))
+        {
+            let sketch = self.construction[..=index]
+                .iter()
+                .rev()
+                .find(|f| matches!(f.kind, ConstructionKind::Sketch))
+                .ok_or("Missing sketch")?
+                .id;
+            result = self.clone();
+            result.activate_sketch(sketch)?;
+            result.features.retain(|f| kept.contains(&f.id));
+            if result
+                .extrusion
+                .as_ref()
+                .is_some_and(|e| !kept.contains(&e.id))
+            {
+                result.extrusion = None;
+            }
+            result.sketches.retain(|s| kept.contains(&s.id));
+        }
+        result.construction.truncate(index + 1);
         Ok(result)
     }
 
@@ -376,26 +422,27 @@ impl Design {
             return Err("Document exceeds current sketch limits".into());
         }
         let mut features = HashSet::new();
-        let mut seen_sketch = None;
-        let mut seen_extrude = false;
+        let mut seen_sketches = HashSet::new();
+        let solid = self.solid_features();
         for f in &self.construction {
             if !features.insert(f.id) || f.name.is_empty() || f.name.len() > 128 {
                 return Err("Invalid construction feature".into());
             }
             match f.kind {
                 ConstructionKind::Sketch => {
-                    if seen_sketch.replace(f.id).is_some() || seen_extrude {
-                        return Err("Only one planar sketch is currently supported".into());
+                    if Some(f.id) != self.current_sketch_id()
+                        && !self.sketches.iter().any(|s| s.id == f.id)
+                    {
+                        return Err("Missing construction sketch".into());
                     }
+                    seen_sketches.insert(f.id);
                 }
                 ConstructionKind::Extrude { sketch } => {
-                    if seen_sketch != Some(sketch)
-                        || seen_extrude
-                        || self.extrusion.as_ref().is_none_or(|e| e.id != f.id)
+                    if !seen_sketches.contains(&sketch)
+                        || !solid.iter().any(|e| e.id == f.id && e.sketch == sketch)
                     {
                         return Err("Invalid construction dependency".into());
                     }
-                    seen_extrude = true;
                 }
             }
         }
@@ -598,17 +645,6 @@ impl Design {
         {
             return Err("Missing extrusion depth parameter".into());
         }
-        if let Some(e) = &self.extrusion {
-            let curves = crate::sketch::entities::curve_ids(self);
-            let unique: std::collections::HashSet<_> = e.boundary.iter().collect();
-            if unique.len() != e.boundary.len()
-                || e.boundary
-                    .iter()
-                    .any(|id| !curves.contains(id) || self.construction_geometry.contains(id))
-            {
-                return Err("Missing or invalid extrusion boundary".into());
-            }
-        }
         for c in &self.constraints {
             if let Some(id) = c.kind.parameter() {
                 let p = self.parameters.iter().find(|p| p.id == id).unwrap();
@@ -617,6 +653,7 @@ impl Design {
                 }
             }
         }
+        self.validate_model()?;
         Ok(())
     }
 }

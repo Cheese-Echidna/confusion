@@ -44,6 +44,15 @@ mod implementation {
     }
 
     impl TextInput {
+        pub fn with_placeholder(mut self, placeholder: &str) -> Self {
+            self.placeholder = placeholder.to_owned().into();
+            self
+        }
+        pub fn focus_and_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            window.focus(&self.focus_handle);
+            self.move_to(0, cx);
+            self.select_to(self.content.len(), cx);
+        }
         fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
             if self.selected_range.is_empty() {
                 self.move_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -612,6 +621,11 @@ mod implementation {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .on_mouse_move(cx.listener(Self::on_mouse_move))
+                .border_1()
+                .border_color(rgb(crate::ui::theme::BORDER))
+                .when(self.focus_handle.is_focused(_window), |el| {
+                    el.border_color(rgb(crate::ui::theme::ACCENT))
+                })
                 .bg(rgb(crate::ui::theme::VIEWPORT))
                 .line_height(px(22.))
                 .text_size(px(13.))
@@ -637,7 +651,7 @@ mod implementation {
             Self {
                 focus_handle: cx.focus_handle(),
                 content: content.to_owned().into(),
-                placeholder: "80 mm".into(),
+                placeholder: "".into(),
                 selected_range: 0..0,
                 selection_reversed: false,
                 marked_range: None,

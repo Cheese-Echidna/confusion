@@ -24,6 +24,8 @@ fn main() {
             "TKGeomAlgo",
             "TKTopAlgo",
             "TKPrim",
+            "TKBO",
+            "TKBool",
             "TKMesh",
         ] {
             println!("cargo:rustc-link-lib={name}");

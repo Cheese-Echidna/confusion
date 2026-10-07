@@ -36,7 +36,7 @@ pub fn save(path: &Path, design: &Design) -> Result<(), String> {
         .write_all(
             &serde_json::to_vec(&Manifest {
                 format: "confusion".into(),
-                version: 4,
+                version: 5,
                 units: "metres".into(),
             })
             .unwrap(),
@@ -87,7 +87,7 @@ pub fn load(path: &Path) -> Result<Design, String> {
     let manifest: Manifest =
         serde_json::from_slice(&read("manifest.json")?).map_err(|e| e.to_string())?;
     if manifest.format != "confusion"
-        || !matches!(manifest.version, 1..=4)
+        || !matches!(manifest.version, 1..=5)
         || manifest.units != "metres"
     {
         return Err("Unsupported .con format, version or units".into());

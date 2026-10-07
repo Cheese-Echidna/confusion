@@ -103,6 +103,28 @@ mod implementation {
             })
             .tooltip(move |_, cx| cx.new(|_| Tip(tooltip.clone())).into())
     }
+    pub fn text_button(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        tooltip: &str,
+    ) -> Stateful<Div> {
+        let tooltip = tooltip.to_owned();
+        div()
+            .id(id)
+            .h(px(30.))
+            .px_3()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(rgb(t::TEXT))
+            .hover(|style| style.bg(rgb(t::HOVER)))
+            .child(label.into())
+            .tooltip(move |_, cx| cx.new(|_| Tip(tooltip.clone())).into())
+    }
     pub fn separator() -> Div {
         div()
             .w(px(1.))
@@ -114,6 +136,41 @@ mod implementation {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[::core::prelude::v1::test]
+        fn every_catalog_icon_loads_and_rasterizes() {
+            use crate::ui::toolbar::{Mode, groups};
+            let renderer = SvgRenderer::new(std::sync::Arc::new(crate::ui::assets::Icons));
+            let mut names = std::collections::HashSet::new();
+            for mode in [Mode::Solid, Mode::Sketch, Mode::Drawing] {
+                for group in groups(mode) {
+                    for feature in group.features {
+                        if !names.insert(feature.icon) {
+                            continue;
+                        }
+                        let bytes = AssetSource::load(
+                            &crate::ui::assets::Icons,
+                            &format!("icons/{}.svg", feature.icon),
+                        )
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("Missing artwork for {}", feature.name));
+                        let image = rasterize_icon(&renderer, &bytes, 28).unwrap_or_else(|error| {
+                            panic!("Invalid artwork for {}: {error}", feature.name)
+                        });
+                        assert!(
+                            image
+                                .as_bytes(0)
+                                .unwrap()
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .any(|pixel| pixel[3] > 0),
+                            "Empty artwork for {}",
+                            feature.name
+                        );
+                    }
+                }
+            }
+        }
         #[::core::prelude::v1::test]
         fn icons_follow_display_size_and_scale_with_supersampled_alpha() {
             let renderer =

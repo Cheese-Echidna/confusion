@@ -19,9 +19,9 @@ Future tools reuse those icons as placeholders.
   bodies; their creation and editing tools are placeholders pending the backend.
 - The upper right has the orientation cube, Home, projection, Fit, Grid, Snap and view
   options. Click a visible cube face or right-click it for all six cardinal views.
-  Sketch remains on XY. Middle drag pans, Shift-middle drag uses constrained orbit,
+  Sketch editing uses the local XY coordinates of its selected plane. Middle drag pans, Shift-middle drag uses constrained orbit,
   and Ctrl-middle drag uses free orbit. Wheel zooms. Grid snapping uses a 1 mm step.
-- Contextual panels contain document paths, current parameters, extrusion depth,
+- Contextual panels contain document paths, current parameters, extrusion depth/operation/target,
   dimensions or view options. Escape closes panels and menus.
 
 The catalog covers sketch creation and constraints; solid creation, modification,
@@ -32,18 +32,17 @@ workflow is active. Unimplemented features remain visible and clearly identified
 ## Construction versus edits
 
 The bottom timeline is **persistent construction**, separate from undo and redo.
-For the supported backend it contains Sketch 1 followed by Extrude 1. Feature IDs
+Sketch and extrusion entries retain source-sketch, plane and target dependencies. Feature IDs
 remain stable when parameters change. Extrude references its source sketch by ID.
 Clicking a sketch edits its parameters and evaluates the construction through that
 sketch; downstream extrusion intent remains in the canonical design. Restoring the
 end regenerates the extrusion using the current parameters. Clicking the extrusion
 opens its depth editor. Drag the narrow marker left or right to move the evaluation point, including before the first feature; no timeline transport buttons are shown.
 
-Saving writes current feature definitions and dependencies to version 2 `.con`.
+Saving writes current feature definitions and dependencies to version 5 `.con`.
 Version 1 files load with a synthesized construction sequence. No previous parameter
 values, undo stack or derived meshes are saved. Undo/redo hold session snapshots in
-memory. A future multi-feature evaluator must extend the same dependency model;
-patterns and multiple sketches are not yet supported by the backend.
+memory. Multiple sketches and exact extrusion joins/cuts now use this dependency model; solid patterns remain unfinished.
 
 ## Modules and checks
 
@@ -79,4 +78,19 @@ overwritten. The current suite passes 19 tests and desktop Clippy.
 
 ## Expanded sketch workflow
 
-The sketch implementation now includes curved geometry, dimension placement and editing, constraint icons, constrained dragging, crossing/window selection, measure, linked offsets, trim/extend, fillets, and transforms. The footer reports sketch DOF and redundancy during editing. See [Sketch workflow](parametric-workflow.md) for current controls, configurable shortcuts, a fully constrained example, and implementation limits. This section supersedes earlier descriptions of sketch tools as placeholders; tools still marked **Not implemented** remain unavailable. The current `.con` format is version 3.
+The sketch implementation now includes curved geometry, dimension placement and editing, constraint icons, constrained dragging, crossing/window selection, measure, linked offsets, trim/extend, fillets, and transforms. The footer reports sketch DOF and redundancy during editing. See [Sketch workflow](parametric-workflow.md) for current controls, configurable shortcuts, a fully constrained example, and implementation limits. This section supersedes earlier descriptions of sketch tools as placeholders; tools still marked **Not implemented** remain unavailable. The current `.con` format is version 5.
+
+## Floating editors and keyboard entry
+
+Contextual editors float inside the model viewport. Tab and Shift-Tab cycle through the current editor's fields and select the value for replacement. Enter confirms extrusion, dimensions, transforms, offset, fillet, parameters and local file paths. Escape closes the editor and returns focus to the viewport. Invalid values retain the editor and show the error beside its controls. Dimension entry appears beside its placed annotation; clicking an existing dimension opens its value there.
+
+The project tree uses a transparent surface, compact disclosure rows and indented children. Click a branch to expand or collapse it; its visibility control operates independently. Supplied FreeCAD flat artwork replaces the LibreCAD icons.
+
+The sketch toolbox supports Up/Down selection and Enter to run the highlighted matching tool. Dimension entry uses a compact on-canvas value box, with Apply and Driving/Driven controls.
+
+
+## Face-attached sketches and extrusion operations
+
+Select an unambiguous planar extrusion cap in Solid mode, then choose **Create sketch**. Sketches appear separately in the browser. **E** opens an extrusion editor with **New body**, **Join**, and **Cut**; the latter two require a target body. A face-attached sketch defaults to an inward cut. Each feature keeps its own depth parameter. Timeline feature edits activate the correct source sketch and retain downstream intent. See [the plate-and-pocket workflow](parametric-workflow.md#multiple-sketches-and-solid-features) for the saved example and current attachment limits.
+
+Native previews: [Inline dimension](assets/ui-inline-dimension.png) and [Floating extrusion editor](assets/ui-floating-editor.png). Verification exercised Tab/Shift-Tab through transform fields, dimension entry and Enter confirmation, toolbox filtering and Up/Down selection, invalid depth retention, extrusion confirmation, and single-press Escape cancellation.

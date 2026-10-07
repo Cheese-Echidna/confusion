@@ -13,3 +13,5 @@ pub mod snapshot;
 pub mod store;
 pub mod transaction;
 pub mod validation;
+
+pub mod model;

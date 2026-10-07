@@ -4,8 +4,7 @@
 #[cfg(all(feature = "solver", feature = "kernel"))]
 mod implementation {
     use crate::{
-        document::schema::Design, kernel::bridge::ffi, parameters::expression, sketch::regions,
-        solver::nonlinear,
+        document::schema::Design, evaluation::solid, kernel::bridge::ffi, solver::nonlinear,
     };
     use std::sync::{Arc, Condvar, Mutex};
     struct Pending {
@@ -14,6 +13,7 @@ mod implementation {
     }
     pub struct ResultSnapshot {
         pub revision: u64,
+        pub features: Vec<uuid::Uuid>,
         pub solution: Result<nonlinear::Solution, String>,
         pub mesh: Result<Option<ffi::Mesh>, String>,
     }
@@ -53,35 +53,17 @@ mod implementation {
                             }
                             p.snapshot.take().unwrap()
                         };
-                        let parameters = expression::evaluate(&design);
-                        let solution = parameters.as_ref().map_err(Clone::clone).and_then(|p| {
-                            nonlinear::solve_cancellable(&design, p, || {
-                                let pending = state.0.lock().unwrap();
-                                pending.stop
-                                    || pending
-                                        .snapshot
-                                        .as_ref()
-                                        .is_some_and(|(r, _)| *r > revision)
-                            })
+                        let evaluated = solid::evaluate(&design, || {
+                            let pending = state.0.lock().unwrap();
+                            pending.stop
+                                || pending
+                                    .snapshot
+                                    .as_ref()
+                                    .is_some_and(|(r, _)| *r > revision)
                         });
-                        let mesh = match (&parameters, &solution) {
-                            (_, Err(e)) | (Err(e), _) => Err(e.clone()),
-                            (Ok(parameters), Ok(solution)) => {
-                                if !solution.conflicts.is_empty() {
-                                    Err(format!(
-                                        "{} conflicting constraints",
-                                        solution.conflicts.len()
-                                    ))
-                                } else if let Some(extrusion) = &design.extrusion {
-                                    regions::select(&design, &solution.points, &extrusion.boundary)
-                                        .and_then(|r| {
-                                            regions::extrude(&r, parameters[&extrusion.depth])
-                                        })
-                                        .map(Some)
-                                } else {
-                                    Ok(None)
-                                }
-                            }
+                        let (solution, mesh, features) = match evaluated {
+                            Ok(model) => (Ok(model.solution), Ok(model.mesh), model.features),
+                            Err(error) => (Err(error.clone()), Err(error), vec![]),
                         };
                         // Drop results already superseded while a native operation was running.
                         if state
@@ -96,6 +78,7 @@ mod implementation {
                         }
                         *output.lock().unwrap() = Some(ResultSnapshot {
                             revision,
+                            features,
                             solution,
                             mesh,
                         });

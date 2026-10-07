@@ -11,3 +11,5 @@ pub mod diagnostics;
 pub mod engine;
 pub mod invalidation;
 pub mod preview;
+
+pub mod solid;

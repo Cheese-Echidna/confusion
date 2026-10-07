@@ -38,6 +38,65 @@ pub struct Region {
 fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
+fn on_arc(e: &Edge, p: [f64; 2]) -> bool {
+    if e.sweep.abs() >= std::f64::consts::TAU - 1e-8 {
+        return true;
+    }
+    let angle = |p: [f64; 2]| (p[1] - e.center[1]).atan2(p[0] - e.center[0]);
+    let delta = ((angle(p) - angle(e.start)) * e.sweep.signum()).rem_euclid(std::f64::consts::TAU);
+    delta <= e.sweep.abs() + 1e-8 || distance(p, e.start) < 1e-7
+}
+/// Exact circular intersection candidates, including tangencies between sample vertices.
+fn circular_intersections(a: &Edge, b: &Edge) -> Vec<[f64; 2]> {
+    if a.sweep == 0. {
+        return circular_intersections(b, a);
+    }
+    let radius = distance(a.start, a.center);
+    let mut points = vec![];
+    if b.sweep == 0. {
+        let v = [b.end[0] - b.start[0], b.end[1] - b.start[1]];
+        let f = [b.start[0] - a.center[0], b.start[1] - a.center[1]];
+        let aa = v[0] * v[0] + v[1] * v[1];
+        let bb = 2. * (f[0] * v[0] + f[1] * v[1]);
+        let cc = f[0] * f[0] + f[1] * f[1] - radius * radius;
+        let disc = bb * bb - 4. * aa * cc;
+        if disc >= -1e-20 {
+            for t in [
+                (-bb - disc.max(0.).sqrt()) / (2. * aa),
+                (-bb + disc.max(0.).sqrt()) / (2. * aa),
+            ] {
+                if (-1e-8..=1. + 1e-8).contains(&t) {
+                    points.push([b.start[0] + t * v[0], b.start[1] + t * v[1]]);
+                }
+            }
+        }
+    } else {
+        let r = distance(b.start, b.center);
+        let d = distance(a.center, b.center);
+        if d < 1e-10 && (r - radius).abs() < 1e-10 {
+            // Coincident arcs: interior samples expose overlap; shared endpoints remain valid.
+            points.extend(a.samples().into_iter().skip(1).filter(|p| on_arc(b, *p)));
+            points.extend(b.samples().into_iter().skip(1).filter(|p| on_arc(a, *p)));
+        } else if d > 1e-10 && d <= radius + r + 1e-10 && d >= (radius - r).abs() - 1e-10 {
+            let x = (radius * radius - r * r + d * d) / (2. * d);
+            let h = (radius * radius - x * x).max(0.).sqrt();
+            let v = [
+                (b.center[0] - a.center[0]) / d,
+                (b.center[1] - a.center[1]) / d,
+            ];
+            for sign in [-1., 1.] {
+                points.push([
+                    a.center[0] + x * v[0] - sign * h * v[1],
+                    a.center[1] + x * v[1] + sign * h * v[0],
+                ]);
+            }
+        }
+    }
+    points
+        .into_iter()
+        .filter(|p| on_arc(a, *p) && (b.sweep == 0. || on_arc(b, *p)))
+        .collect()
+}
 fn contains(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
     let mut inside = false;
     for ab in poly.windows(2) {
@@ -52,6 +111,7 @@ fn contains(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
 }
 /// Reject ambiguous/open/intersecting contours rather than silently changing the region.
 pub fn regions(d: &Design, xy: &[[f64; 2]]) -> Result<Vec<Region>, String> {
+    d.validate()?;
     if xy.len() != d.points.len() || xy.iter().flatten().any(|v| !v.is_finite()) {
         return Err("Invalid solved profile points".into());
     }
@@ -130,6 +190,29 @@ pub fn regions(d: &Design, xy: &[[f64; 2]]) -> Result<Vec<Region>, String> {
             wire.push(e);
         }
         loops.push(wire);
+    }
+    for (i, wire) in loops.iter().enumerate() {
+        for (a, e) in wire.iter().enumerate() {
+            for (j, other) in loops.iter().enumerate().skip(i) {
+                for (b, f) in other.iter().enumerate() {
+                    if i == j && b <= a {
+                        continue;
+                    }
+                    if e.sweep == 0. && f.sweep == 0. {
+                        continue;
+                    }
+                    let adjacent = i == j && (b == a + 1 || (a == 0 && b == wire.len() - 1));
+                    for p in circular_intersections(e, f) {
+                        let shared = adjacent
+                            && [e.start, e.end].iter().any(|q| distance(*q, p) < 1e-7)
+                            && [f.start, f.end].iter().any(|q| distance(*q, p) < 1e-7);
+                        if !shared {
+                            return Err("Profiles intersect or touch".into());
+                        }
+                    }
+                }
+            }
+        }
     }
     let polygons: Vec<Vec<_>> = loops
         .iter()

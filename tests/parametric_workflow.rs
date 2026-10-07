@@ -304,10 +304,12 @@ fn tool_catalog_has_unique_ids_existing_icons_and_unavailable_drawings() {
             assert!(!group.features.is_empty());
             for feature in group.features {
                 assert!(ids.insert(feature.id), "duplicate {}", feature.id);
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets/icons/librecad_svg_icons")
-                    .join(format!("{}.svg", feature.icon));
-                assert!(path.is_file(), "missing {}", feature.icon);
+                let assets = include_str!("../src/ui/assets.rs");
+                assert!(
+                    assets.contains(&format!("\"icons/{}.svg\"", feature.icon)),
+                    "missing icon mapping {}",
+                    feature.icon
+                );
                 if mode == Mode::Drawing {
                     assert!(!feature.available());
                 }

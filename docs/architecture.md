@@ -14,9 +14,9 @@ Surface geometry is needed inside solid algorithms; a separate surface-design
 workbench is outside the agreed scope.
 
 This repository contains a **compilable architecture scaffold, GPU viewport and working
-planar sketch → exact extrusion workflow**. The current document schema, length expression
+multi-sketch → exact extrusion/join/cut workflow**. The current document schema, length expression
 parser, constraint solver, OCCT bridge, background worker, `.con` persistence and sketch/model
-UI are implemented. Most other modules describe proposed APIs in their top comments.
+UI are implemented. Sketches may use XY or semantic extrusion-cap planes; exact Boolean history tracks cap associations and reports deleted/split supports. Most other modules describe proposed APIs in their top comments.
 See [parametric-workflow.md](parametric-workflow.md) for supported modeling behavior and
 [viewport-proof.md](viewport-proof.md) for compositor integration. See [file-map.md](file-map.md)
 for all source contracts, [libraries.md](libraries.md) for dependencies and

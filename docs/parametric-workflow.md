@@ -39,12 +39,30 @@ The existing single settings JSON file accepts command-to-chord overrides. Resta
 
 The solver uses damped least-squares QR, analytic and numerical Jacobians, and SVD to report local point freedom. Drag targets are temporary soft objectives; permanent constraints take precedence. Redundancy is a local rank diagnostic, not a minimal conflict explanation. Curves are sampled for display and some measurements are approximate.
 
-Version 4 `.con` files preserve geometry, constraints, expressions, construction flags, annotations, and driven dimensions; older versions remain readable. Undo history and derived meshes are not serialized.
+Version 5 `.con` files preserve geometry, constraints, expressions, construction flags, annotations, and driven dimensions; older versions remain readable. Undo history and derived meshes are not serialized.
 
-This is not complete Fusion parity. Sketches currently use a single XY plane. Projection, sketch text, general conics, curvature continuity, complete spline/ellipse constraints, associative editable pattern definitions, and a graphical shortcut editor remain unfinished. Patterns currently create copies with internal constraints and shared parameter references. Sketch documents are bounded to 128 points, 128 curves, 256 constraints, and 128 parameters.
+This is not complete Fusion parity. Sketches use XY or planar extrusion caps; arbitrary face/edge attachments and general construction planes remain unfinished. Projection, sketch text, general conics, curvature continuity, complete spline/ellipse constraints, associative editable pattern definitions, and a graphical shortcut editor remain unfinished. Patterns currently create copies with internal constraints and shared parameter references. Each sketch is bounded to 128 points, 128 curves, and 256 constraints. A design supports up to 64 sketches, 64 solid features, and 128 shared parameters.
 
 Exact OCCT extrusion accepts closed regions made of lines, circles, and circular arcs, including nested holes and slots. Press **E** with no selection to extrude the single outer region. For multiple outlines, select one boundary curve and press **E**; select a hole boundary to extrude its interior instead. An existing extrusion retains its selected boundary when edited without a selection.
 
 Extrusion stores the selected outer boundary's curve IDs in version 4 `.con` files. Parameter edits and save/reopen retain that region; deleting or replacing its boundary requires explicit reselection. Earlier file versions remain readable and use automatic selection. Open, branching, intersecting, or touching contours are rejected. Ellipses and splines must be construction geometry for this extrusion workflow.
 
 The complex acceptance sketch can now be extruded as a plate with four circular holes and the center slot. Width changes regenerate the exact solid, including hole positions and slot length. Region classification uses sampled curves; the native solid uses exact OCCT lines and circular arcs and is checked for validity.
+
+
+## Multiple sketches and solid features
+
+1. Create and constrain the base sketch, then press **E** and apply **New body**.
+2. In Solid mode, select its top or bottom planar cap and choose **Create sketch**. With no face selected, a new sketch uses XY. Side faces and curved faces are not supported yet.
+3. Draw a closed pocket profile and press **E**. Face sketches default to **Cut**, directed inward from the selected cap. **Join** adds material outward; **New body** creates a separate solid. Join/Cut list available target bodies in the extrusion editor.
+4. Click a sketch in the browser or timeline to edit it. Click a solid feature to edit its depth and operation. Return to the end of the timeline to regenerate all downstream features.
+
+Open [plate-pocket.con](assets/plate-pocket.con) for an 80 × 50 × 10 mm plate with a face-attached 20 × 10 × 3 mm pocket. Change `width` or `thickness` in Parameters; the pocket plane follows the plate's top cap. The source sketch geometry remains in its own local coordinates. Regenerate the example with:
+
+```sh
+nix-shell --run 'cargo run --features solver,kernel --example model_workflow --locked -- docs/assets/plate-pocket.con'
+```
+
+Version 5 stores separate sketch geometry, plane dependencies, feature IDs, target bodies, regions and depth parameters. The active sketch occupies the original geometry fields for compatibility; inactive sketches each have one stored geometry definition. Parameters are shared across sketches. Versions 1–4 remain readable and retain their original sketch and extrusion.
+
+Face anchors store the support feature, producing feature and Start/End cap role. OCCT Boolean history propagates those roles through joins and cuts. Deleted or split supports produce an explicit reattachment error, and failed features do not publish a successful mesh. This is the initial topology-reference implementation; arbitrary face naming and a graphical reattachment editor remain unfinished. No-op Booleans and operations producing multiple disconnected solids are rejected. New bodies remain independent, and explicit targets must refer to an unconsumed upstream body. Parameter/expression and feature dependency cycles are rejected.

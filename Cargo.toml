@@ -53,3 +53,7 @@ required-features = ["gpu"]
 [[example]]
 name = "sketch_workflow"
 required-features = ["solver"]
+
+[[example]]
+name = "model_workflow"
+required-features = ["solver", "kernel"]
