@@ -41,7 +41,7 @@ The solver uses damped least-squares QR, analytic and numerical Jacobians, and S
 
 Version 5 `.con` files preserve geometry, constraints, expressions, construction flags, annotations, and driven dimensions; older versions remain readable. Undo history and derived meshes are not serialized.
 
-This is not complete Fusion parity. Sketches use XY or planar extrusion caps; arbitrary face/edge attachments and general construction planes remain unfinished. Projection, sketch text, general conics, curvature continuity, complete spline/ellipse constraints, associative editable pattern definitions, and a graphical shortcut editor remain unfinished. Patterns currently create copies with internal constraints and shared parameter references. Each sketch is bounded to 128 points, 128 curves, and 256 constraints. A design supports up to 64 sketches, 64 solid features, and 128 shared parameters.
+This is not complete Fusion parity. Sketches use XY or any flat face, with a stable face reference that follows upstream regeneration. Edge attachments and general construction planes remain unfinished. Projection, sketch text, general conics, curvature continuity, complete spline/ellipse constraints, associative editable pattern definitions, and a graphical shortcut editor remain unfinished. Patterns currently create copies with internal constraints and shared parameter references. Each sketch is bounded to 128 points, 128 curves, and 256 constraints. A design supports up to 64 sketches, 64 solid features, and 128 shared parameters.
 
 Exact OCCT extrusion accepts regions bounded by lines, circles, circular arcs, ellipses, and fit/control splines, including nested holes and slots. Crossings and shared edges split the sketch into bounded faces. Click inside the desired face to select and shade it, then press **E**. Points and edges retain picking priority. Press **E** with no selection to extrude the single outer region; an edge selection works when it identifies only one region. An existing extrusion retains its selected boundary when edited without a selection.
 
@@ -53,8 +53,8 @@ The complex acceptance sketch can now be extruded as a plate with four circular 
 ## Multiple sketches and solid features
 
 1. Create and constrain the base sketch, then press **E** and apply **New body**.
-2. In Solid mode, select its top or bottom planar cap and choose **Create sketch**. With no face selected, a new sketch uses XY. Side faces and curved faces are not supported yet.
-3. Draw a closed pocket profile and press **E**. Face sketches default to **Cut**, directed inward from the selected cap. **Join** adds material outward; **New body** creates a separate solid. Join/Cut list available target bodies in the extrusion editor.
+2. In Solid mode, select any flat face and choose **Create sketch**. With no face selected, **Create sketch** opens face selection. **Use XY plane** chooses the origin plane. Curved faces cannot support a flat sketch.
+3. Draw a closed pocket profile and press **E**. Face sketches default to **Cut**, directed inward from the selected face. **Join** adds material outward; **New body** creates a separate solid. Join/Cut list available target bodies in the extrusion editor. The viewport previews the exact resulting solid as depth, operation, or target changes. Negative depth reverses the direction. Apply validates the result before committing it, then hides the used sketch by default; its tree visibility control can show it again.
 4. Click a sketch in the browser or timeline to edit it. Click a solid feature to edit its depth and operation. Return to the end of the timeline to regenerate all downstream features.
 
 Open [plate-pocket.con](assets/plate-pocket.con) for an 80 × 50 × 10 mm plate with a face-attached 20 × 10 × 3 mm pocket. Change `width` or `thickness` in Parameters; the pocket plane follows the plate's top cap. The source sketch geometry remains in its own local coordinates. Regenerate the example with:

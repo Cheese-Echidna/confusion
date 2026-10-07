@@ -145,6 +145,62 @@ fn main() -> Result<()> {
         coverage_colors.len() > 8,
         "MSAA silhouette has no fractional coverage"
     );
+    use confusion::render::passes::ViewStyle;
+    let original_pick = pick(&renderer, [400, 300], 70)?;
+    let mut styles = Vec::new();
+    for style in [
+        ViewStyle::Shaded,
+        ViewStyle::ShadedEdges,
+        ViewStyle::ShadedHiddenEdges,
+        ViewStyle::Wireframe,
+        ViewStyle::VisibleEdges,
+    ] {
+        renderer.set_style(style);
+        renderer.render(&view, &camera, 0);
+        let pixels = read_color(&renderer, &color)?;
+        assert!(
+            styles.iter().all(|previous| previous != &pixels),
+            "Styles produce identical output: {style:?}"
+        );
+        styles.push(pixels);
+        assert_eq!(
+            pick(&renderer, [400, 300], 71)?,
+            original_pick,
+            "Style changed picking"
+        );
+    }
+    renderer.set_style(ViewStyle::Shaded);
+    let (mut preview, preview_indices) = confusion::render::scene::demo_cube();
+    for vertex in &mut preview {
+        vertex.position = vertex.position.map(|p| p * 0.5);
+        vertex.color = [0.8, 0.4, 0.1];
+        vertex.face = 999;
+    }
+    renderer.set_preview(
+        &preview,
+        &preview_indices
+            .iter()
+            .map(|i| *i as u32)
+            .collect::<Vec<_>>(),
+    );
+    renderer.render(&view, &camera, 0);
+    assert_ne!(
+        read_color(&renderer, &color)?,
+        image,
+        "Preview did not change display"
+    );
+    assert_eq!(
+        pick(&renderer, [400, 300], 72)?,
+        original_pick,
+        "Preview replaced committed face IDs"
+    );
+    renderer.clear_preview();
+    renderer.render(&view, &camera, 0);
+    assert_eq!(
+        read_color(&renderer, &color)?,
+        image,
+        "Cancel did not restore original mesh"
+    );
     renderer.set_grid(true, true);
     renderer.render(&view, &camera, 0);
     let grid_image = read_color(&renderer, &color)?;
@@ -256,7 +312,7 @@ fn main() -> Result<()> {
     encoder.set_depth(png::BitDepth::Eight);
     encoder.write_header()?.write_image_data(&image)?;
     println!(
-        "Passed: six face IDs, depth occlusion, background miss, selection shading, appearance colors, color encoding, revision stamps and resize. Saved {path}"
+        "Passed: five distinct visual styles, preview isolation and cancellation, six face IDs, depth occlusion, background miss, selection shading, appearance colors, color encoding, revision stamps and resize. Saved {path}"
     );
     Ok(())
 }

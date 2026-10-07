@@ -1048,16 +1048,6 @@ pub fn fillet(d: &mut Design, selected: &[Uuid], radius: f64) -> Result<(), Stri
             .find(|line| line.id == l.id)
             .unwrap()
             .ends[usize::from(l.ends[1] == common)] = next;
-        for c in &mut d.constraints {
-            if let C::Length { line, parameter } = c.kind
-                && line == l.id
-            {
-                c.kind = C::Distance {
-                    points: l.ends,
-                    parameter,
-                }
-            }
-        }
     }
     let cross = (tangent[0][0] - center[0]) * (tangent[1][1] - center[1])
         - (tangent[0][1] - center[1]) * (tangent[1][0] - center[0]);
@@ -1066,7 +1056,32 @@ pub fn fillet(d: &mut Design, selected: &[Uuid], radius: f64) -> Result<(), Stri
     } else {
         (tangent[1], tangent[0])
     };
+    // The trimmed corner is no longer geometry. Remove dimensions/constraints attached to it.
+    if !crate::sketch::entities::curve_ids(d)
+        .into_iter()
+        .any(|id| curve_points(d, id).contains(&common))
+    {
+        d.constraints
+            .retain(|c| !c.kind.references().contains(&common));
+        d.driven_dimensions
+            .retain(|c| !c.kind.references().contains(&common));
+        remove_detached_points(d, &[common]);
+    }
     let arc = circle(d, center, start, Some(end))?;
+    let arc_geometry = d.circles.iter().find(|c| c.id == arc).unwrap().clone();
+    for (i, l) in lines.iter().enumerate() {
+        let tangent_point = d.lines.iter().find(|line| line.id == l.id).unwrap().ends
+            [usize::from(l.ends[1] == common)];
+        let arc_point = if tangent[i] == start {
+            arc_geometry.rim
+        } else {
+            arc_geometry.end.unwrap()
+        };
+        d.constrain(C::Coincident {
+            points: [tangent_point, arc_point],
+        });
+    }
+
     let parameter = d.parameter(
         &format!("fillet{}", d.parameters.len()),
         format!("{} mm", radius * 1000.),

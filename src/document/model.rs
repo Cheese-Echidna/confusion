@@ -13,6 +13,10 @@ pub enum CapRole {
 pub enum SketchPlane {
     #[default]
     Xy,
+    NamedFace {
+        support: Uuid,
+        reference: String,
+    },
     /// Resolve the producer's cap in the support feature's evaluated output.
     Face {
         support: Uuid,
@@ -62,6 +66,60 @@ pub struct ExtrudeFeature {
     pub target: Option<Uuid>,
 }
 impl Design {
+    /// Bodies available immediately before a construction event, including edits.
+    pub(crate) fn bodies_before(&self, id: Uuid) -> std::collections::HashSet<Uuid> {
+        let mut timeline = self.clone();
+        timeline.sync_construction();
+        let features = timeline.solid_features();
+        let mut bodies = std::collections::HashSet::new();
+        for event in &timeline.construction {
+            if event.id == id {
+                break;
+            }
+            if let Some(f) = features.iter().find(|f| f.id == event.id) {
+                if let Some(target) = f.target {
+                    bodies.remove(&target);
+                }
+                bodies.insert(f.id);
+            } else if let Some(f) = timeline.create_features.iter().find(|f| f.id == event.id) {
+                if f.kind.consumes_body() {
+                    if let Some(target) = f.target {
+                        bodies.remove(&target);
+                    }
+                    if let Some(target) = f.second_target {
+                        bodies.remove(&target);
+                    }
+                }
+                bodies.insert(f.id);
+            } else if let Some(e) = timeline.solid_edits.iter().find(|e| e.id == event.id) {
+                use crate::model::modify::ModifyKind;
+                if matches!(e.kind, ModifyKind::Delete | ModifyKind::Remove) && e.face == 0 {
+                    bodies.remove(&e.target);
+                }
+                if e.kind == ModifyKind::Combine && !e.copy {
+                    if let Some(tool) = e.tool {
+                        bodies.remove(&tool);
+                    }
+                }
+            }
+        }
+        bodies
+    }
+    fn produced_before(&self, id: Uuid) -> std::collections::HashSet<Uuid> {
+        let mut d = self.clone();
+        d.sync_construction();
+        d.construction
+            .iter()
+            .take_while(|f| f.id != id)
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    ConstructionKind::Extrude { .. } | ConstructionKind::Create
+                )
+            })
+            .map(|f| f.id)
+            .collect()
+    }
     pub fn primary_sketch_id(&self) -> Option<Uuid> {
         self.construction
             .iter()
@@ -198,10 +256,14 @@ impl Design {
         result
     }
     pub fn latest_body_feature(&self) -> Option<Uuid> {
-        self.features
-            .last()
+        let current = self.bodies_before(Uuid::nil());
+        let mut d = self.clone();
+        d.sync_construction();
+        d.construction
+            .iter()
+            .rev()
+            .find(|f| current.contains(&f.id))
             .map(|f| f.id)
-            .or_else(|| self.extrusion.as_ref().map(|e| e.id))
     }
     pub fn validate_model(&self) -> Result<(), String> {
         self.validate_modifications()?;
@@ -276,6 +338,7 @@ impl Design {
         let mut available = HashSet::new();
         let mut consumed = HashSet::new();
         for feature in &features {
+            let upstream = self.bodies_before(feature.id);
             if !sketch_ids.contains(&feature.sketch)
                 || available.contains(&feature.id)
                 || entities.contains(&feature.id)
@@ -299,15 +362,26 @@ impl Design {
                 (
                     ExtrudeOperation::Join | ExtrudeOperation::Cut | ExtrudeOperation::CutNewBody,
                     Some(target),
-                ) if available.contains(&target) && consumed.insert(target) => {}
+                ) if upstream.contains(&target) && consumed.insert(target) => {}
                 _ => return Err("Invalid solid target: choose a current upstream body".into()),
             }
             if let SketchPlane::Face {
                 support, producer, ..
             } = self.sketch_plane(feature.sketch)?
-                && (!available.contains(support) || !available.contains(producer))
+                && (!self.produced_before(feature.id).contains(support)
+                    || !self.produced_before(feature.id).contains(producer))
             {
                 return Err("Sketch face attachment has a missing or cyclic dependency".into());
+            }
+            if let SketchPlane::NamedFace { support, reference } =
+                self.sketch_plane(feature.sketch)?
+            {
+                if !self.produced_before(feature.id).contains(support)
+                    || reference.is_empty()
+                    || reference.len() > 4096
+                {
+                    return Err("Sketch face attachment has a missing or cyclic dependency".into());
+                }
             }
             let input = self.sketch_input(feature.sketch)?;
             let curves = crate::sketch::entities::curve_ids(&input);
@@ -322,15 +396,25 @@ impl Design {
             }
             available.insert(feature.id);
         }
+        available.extend(self.create_features.iter().map(|f| f.id));
         // Unconsumed sketches also need resolvable plane dependencies.
         for id in sketch_ids {
             if self.parameters.iter().any(|p| p.id == id) || entities.contains(&id) {
                 return Err("Duplicate sketch ID".into());
             }
+            if let SketchPlane::NamedFace { support, reference } = self.sketch_plane(id)? {
+                if !self.bodies_before(id).contains(support)
+                    || reference.is_empty()
+                    || reference.len() > 4096
+                {
+                    return Err("Missing sketch support feature".into());
+                }
+            }
             if let SketchPlane::Face {
                 support, producer, ..
             } = self.sketch_plane(id)?
-                && (!available.contains(support) || !available.contains(producer))
+                && (!self.produced_before(id).contains(support)
+                    || !self.produced_before(id).contains(producer))
             {
                 return Err("Missing sketch support feature".into());
             }

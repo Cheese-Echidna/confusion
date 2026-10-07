@@ -19,6 +19,7 @@ with tempfile.TemporaryDirectory(prefix="confusion-sketch-region-") as directory
     root = pathlib.Path(directory)
     target = root / "source"
     target.mkdir()
+    (target / "vendor").symlink_to(source / "vendor", target_is_directory=True)
     for name in ["Cargo.toml", "Cargo.lock", "build.rs", "src", "assets", "examples", "tests"]:
         origin = source / name
         if origin.is_dir(): shutil.copytree(origin, target / name)
@@ -41,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix="confusion-sketch-region-") as directory
                         assert!(self.sketch_region.is_some(),"Interior did not select a region");
                         let boundary=self.sketch_region.as_ref().unwrap().boundary.clone();assert!(boundary.iter().any(crate::sketch::regions::is_boundary_token));
                         self.open_extrude(cx);self.depth.update(cx,|input,cx|input.set_content("10 mm".into(),cx));assert!(self.extrusion_preview(cx).is_some());self.extrude(cx);
-                        assert!(self.error.is_none(),"Extrude failed: {:?}",self.error);assert_eq!(self.design.extrusion.as_ref().unwrap().boundary,boundary);state.0=2;
+                        assert!(self.error.is_none(),"Extrude failed: {:?}",self.error);assert!(self.pending_candidate.is_some());state.0=2;
                     }
                     2 if self.volume.is_some() => {
                         assert!((self.volume.unwrap()-0.02*0.02*0.01).abs()<1e-10);

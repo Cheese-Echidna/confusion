@@ -183,7 +183,8 @@ fn background_latest_revision_regenerates_and_kernel_errors_are_results() {
         ffi::Point2 { x: 0.08, y: 0. },
         ffi::Point2 { x: 0.08, y: 0.04 },
     ];
-    assert!(ffi::extrude(&points, -0.01).is_err());
+    assert!(ffi::extrude(&points, -0.01).is_ok());
+    assert!(ffi::extrude(&points, 0.).is_err());
 }
 
 #[test]

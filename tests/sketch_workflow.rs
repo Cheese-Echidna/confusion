@@ -426,3 +426,62 @@ fn complex_acceptance_sketch_reopens_and_regenerates_without_free_points() {
         }
     }
 }
+
+#[cfg(feature = "solver")]
+#[test]
+fn intrinsic_positive_spans_prevent_collapsed_lines_and_radii() {
+    for circle in [false, true] {
+        let mut d = Design::default();
+        let ends = if circle {
+            let id = edit::circle(&mut d, [0., 0.], [0.01, 0.], None).unwrap();
+            let c = d.circles.iter().find(|c| c.id == id).unwrap();
+            [c.center, c.rim]
+        } else {
+            let id = d.line([0., 0.], [0.01, 0.]);
+            d.lines.iter().find(|l| l.id == id).unwrap().ends
+        };
+        for point in ends {
+            d.constrain(C::Fixed {
+                point,
+                xy: [0., 0.],
+            });
+        }
+        let result = solve(&d);
+        assert!(
+            !result.conflicts.is_empty(),
+            "Collapsed geometry must be infeasible"
+        );
+    }
+    let mut d = Design::default();
+    let id = d.line([0., 0.], [0.01, 0.]);
+    let ends = d.lines.iter().find(|l| l.id == id).unwrap().ends;
+    d.points.iter_mut().find(|p| p.id == ends[1]).unwrap().xy = [0., 0.];
+    let result = solve(&d);
+    assert!(result.conflicts.is_empty());
+    let positions: Vec<_> = ends
+        .map(|id| result.points[d.points.iter().position(|p| p.id == id).unwrap()])
+        .into();
+    assert!((positions[0][0] - positions[1][0]).hypot(positions[0][1] - positions[1][1]) > 1e-7);
+}
+
+#[cfg(feature = "solver")]
+#[test]
+fn sketch_fillet_removes_unused_corner_and_its_constraints() {
+    let mut d = Design::default();
+    let a = d.line([0., 0.], [0.04, 0.]);
+    let b = d.line([0.04, 0.], [0.04, 0.04]);
+    let corner = d.lines.iter().find(|l| l.id == a).unwrap().ends[1];
+    d.constrain(C::Fixed {
+        point: corner,
+        xy: [0.04, 0.],
+    });
+    edit::fillet(&mut d, &[a, b], 0.005).unwrap();
+    assert!(!d.points.iter().any(|p| p.id == corner));
+    assert!(
+        !d.constraints
+            .iter()
+            .any(|c| c.kind.references().contains(&corner))
+    );
+    d.validate().unwrap();
+    assert!(solve(&d).conflicts.is_empty());
+}

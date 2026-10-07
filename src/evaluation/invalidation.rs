@@ -28,82 +28,105 @@ pub(crate) fn feature_keys(
                     .collect::<Vec<_>>()
             })
     };
-    let mut keys: Vec<String> = Vec::new();
-    for step in steps {
+    let mut keys = vec![String::new(); steps.len() + creates.len() + edits.len()];
+    let mut bodies = vec![String::new(); steps.len() + creates.len()];
+    let mut events = Vec::new();
+    for (i, s) in steps.iter().enumerate() {
+        events.push((s.sequence, 0, i));
+    }
+    for (i, s) in creates.iter().enumerate() {
+        events.push((s.sequence, 1, i));
+    }
+    for (i, s) in edits.iter().enumerate() {
+        events.push((s.sequence, 2, i));
+    }
+    events.sort_by_key(|e| e.0);
+    for (_, kind, i) in events {
         let dependency = |index: i32| -> Result<Option<&str>, String> {
             if index == -1 {
                 Ok(None)
             } else {
-                keys.get(index as usize)
+                bodies
+                    .get(index as usize)
+                    .filter(|k| !k.is_empty())
                     .map(|k| Some(k.as_str()))
                     .ok_or("Invalid cache dependency".into())
             }
         };
-        keys.push(key(&(
-            (
-                &step.identity,
-                step.edge_start,
-                step.edge_count,
-                step.depth,
-                step.operation,
-                step.target,
-                step.support,
-                step.producer,
-                step.role,
-            ),
-            profile(step.edge_start, step.edge_count).ok_or("Invalid profile range")?,
-            dependency(step.target)?,
-            dependency(step.support)?,
-            dependency(step.producer)?,
-        ))?);
-    }
-    for step in creates {
-        let dependency = |index: i32| -> Result<Option<&str>, String> {
-            if index == -1 {
-                Ok(None)
-            } else {
-                keys.get(index as usize)
-                    .map(|k| Some(k.as_str()))
-                    .ok_or("Invalid cache dependency".into())
+        let (slot, value) = match kind {
+            0 => {
+                let s = &steps[i];
+                (
+                    i,
+                    key(&(
+                        (
+                            &s.identity,
+                            s.sequence,
+                            &s.reference,
+                            s.plane,
+                            s.depth,
+                            s.operation,
+                            s.target,
+                            s.support,
+                            s.producer,
+                            s.role,
+                        ),
+                        profile(s.edge_start, s.edge_count).ok_or("Invalid profile range")?,
+                        dependency(s.target)?,
+                        dependency(s.support)?,
+                        dependency(s.producer)?,
+                    ))?,
+                )
+            }
+            1 => {
+                let s = &creates[i];
+                (
+                    steps.len() + i,
+                    key(&(
+                        (
+                            &s.identity,
+                            s.sequence,
+                            s.kind,
+                            s.target,
+                            s.second_target,
+                            &s.values,
+                        ),
+                        profile(s.edge_start, s.edge_count).ok_or("Invalid profile range")?,
+                        profile(s.second_start, s.second_count).ok_or("Invalid profile range")?,
+                        dependency(s.target)?,
+                        dependency(s.second_target)?,
+                    ))?,
+                )
+            }
+            _ => {
+                let s = &edits[i];
+                (
+                    steps.len() + creates.len() + i,
+                    key(&(
+                        (
+                            s.kind, s.target, s.tool, s.face, s.a, s.b, s.c, s.d, s.copy, s.mode,
+                        ),
+                        (
+                            &s.identity,
+                            s.sequence,
+                            &s.face_reference,
+                            &s.tool_reference,
+                            s.edge_points
+                                .iter()
+                                .map(|p| (p.x, p.y, p.z))
+                                .collect::<Vec<_>>(),
+                        ),
+                        &bodies,
+                    ))?,
+                )
             }
         };
-        keys.push(key(&(
-            (
-                &step.identity,
-                step.kind,
-                step.edge_start,
-                step.edge_count,
-                step.second_start,
-                step.second_count,
-                step.target,
-                step.second_target,
-                &step.values,
-            ),
-            profile(step.edge_start, step.edge_count).ok_or("Invalid profile range")?,
-            profile(step.second_start, step.second_count).ok_or("Invalid profile range")?,
-            dependency(step.target)?,
-            dependency(step.second_target)?,
-        ))?);
-    }
-    for step in edits {
-        // Face ordinals depend on the complete preceding model, so edits use
-        // conservative prefix invalidation rather than target-only invalidation.
-        keys.push(key(&(
-            (
-                step.kind,
-                step.target,
-                step.tool,
-                step.face,
-                step.a,
-                step.b,
-                step.c,
-                step.d,
-                step.copy,
-                step.mode,
-            ),
-            (&step.identity, &step.face_reference, &step.tool_reference),
-            &keys,
-        ))?);
+        keys[slot] = value.clone();
+        if kind < 2 {
+            bodies[slot] = value;
+        } else {
+            bodies[edits[i].target as usize] = value;
+        }
     }
     Ok(keys)
 }

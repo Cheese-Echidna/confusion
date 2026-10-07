@@ -70,6 +70,9 @@ mod tests {
         rectangle(&mut edges, 0.01, 0.01, 0.02, 0.01);
         let steps = vec![
             ffi::ModelStep {
+                plane: -1,
+                sequence: 0,
+                reference: String::new(),
                 identity: String::new(),
                 edge_start: 0,
                 edge_count: 4,
@@ -81,6 +84,9 @@ mod tests {
                 role: 0,
             },
             ffi::ModelStep {
+                plane: -1,
+                sequence: 0,
+                reference: String::new(),
                 identity: String::new(),
                 edge_start: 4,
                 edge_count: 4,

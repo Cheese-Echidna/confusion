@@ -141,6 +141,13 @@ mod implementation {
                 .map(|i| i as i32)
                 .ok_or("Missing feature dependency".to_string())
         };
+        let sequence = |id: Uuid| {
+            design
+                .construction
+                .iter()
+                .position(|f| f.id == id)
+                .map_or(0, |i| i as u32 + 1)
+        };
         let mut edges = vec![];
         let mut steps = vec![];
         for feature in &features {
@@ -166,8 +173,11 @@ mod implementation {
                     edges.push(e.native(wire as u32));
                 }
             }
-            let (support, producer, role) = match design.sketch_plane(feature.sketch)? {
-                SketchPlane::Xy => (-1, -1, 0),
+            let (support, producer, role, reference) = match design.sketch_plane(feature.sketch)? {
+                SketchPlane::Xy => (-1, -1, 0, String::new()),
+                SketchPlane::NamedFace { support, reference } => {
+                    (index(*support)?, -1, 0, reference.clone())
+                }
                 SketchPlane::Face {
                     support,
                     producer,
@@ -176,9 +186,18 @@ mod implementation {
                     index(*support)?,
                     index(*producer)?,
                     if *role == CapRole::Start { 1 } else { 2 },
+                    String::new(),
                 ),
             };
             steps.push(ffi::ModelStep {
+                plane: design
+                    .construction
+                    .iter()
+                    .filter(|f| matches!(f.kind, crate::document::schema::ConstructionKind::Sketch))
+                    .position(|f| f.id == feature.sketch)
+                    .map_or(-1, |i| i as i32),
+                sequence: sequence(feature.id),
+                reference,
                 identity: feature.id.to_string(),
                 edge_start: start,
                 edge_count: edges.len() as u32 - start,
@@ -229,6 +248,7 @@ mod implementation {
             let (edge_start, edge_count) = add_profile(feature.sketch, &feature.boundary)?;
             let (second_start, second_count) = add_profile(feature.second_sketch, &[])?;
             creates.push(ffi::CreateStep {
+                sequence: sequence(feature.id),
                 identity: feature.id.to_string(),
                 kind: feature.kind as u32,
                 edge_start,
@@ -246,8 +266,11 @@ mod implementation {
             .iter()
             .filter(|f| matches!(f.kind, crate::document::schema::ConstructionKind::Sketch))
         {
-            let (support, producer, role) = match design.sketch_plane(sketch.id)? {
-                SketchPlane::Xy => (-1, -1, 0),
+            let (support, producer, role, reference) = match design.sketch_plane(sketch.id)? {
+                SketchPlane::Xy => (-1, -1, 0, String::new()),
+                SketchPlane::NamedFace { support, reference } => {
+                    (index(*support)?, -1, 0, reference.clone())
+                }
                 SketchPlane::Face {
                     support,
                     producer,
@@ -256,9 +279,12 @@ mod implementation {
                     index(*support)?,
                     index(*producer)?,
                     if *role == CapRole::Start { 1 } else { 2 },
+                    String::new(),
                 ),
             };
             planes.push(ffi::FaceRequest {
+                sequence: sequence(sketch.id),
+                reference,
                 support,
                 producer,
                 role,
@@ -284,9 +310,19 @@ mod implementation {
                     resolved.values = values;
                     resolved.validate()?;
                     Ok(ffi::ModifyStep {
+                        sequence: sequence(e.id),
                         identity: e.id.to_string(),
                         face_reference: e.face_reference.clone().unwrap_or_default(),
                         tool_reference: e.tool_reference.clone().unwrap_or_default(),
+                        edge_points: e
+                            .edge_points
+                            .iter()
+                            .map(|p| ffi::SpatialPoint {
+                                x: p[0],
+                                y: p[1],
+                                z: p[2],
+                            })
+                            .collect(),
                         kind: e.kind.code(),
                         target: index(e.target)? as u32,
                         tool: e.tool.map(&index).transpose()?.unwrap_or(-1),
@@ -306,7 +342,7 @@ mod implementation {
                 )?;
                 let plane_keys: Vec<_> = planes
                     .iter()
-                    .map(|p| (p.support, p.producer, p.role))
+                    .map(|p| (p.support, p.producer, p.role, p.sequence, &p.reference))
                     .collect();
                 let mesh_key = crate::evaluation::cache::key(&(&keys, plane_keys))?;
                 if let Some((_, mesh)) = cache.mesh.as_ref().filter(|(key, _)| *key == mesh_key) {

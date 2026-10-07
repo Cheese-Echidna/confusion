@@ -90,8 +90,8 @@ static TopoDS_Shape heal_face(const TopoDS_Shape& shape, const TopoDS_Face& face
 }
 static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consumed,
                         rust::Slice<const ModifyStep> edits, ModelCacheImpl *cache,
-                        rust::Slice<const rust::String> keys, size_t offset, rust::Vec<BoundFaceReference>& references) {
-  for (size_t n = 0; n < edits.size(); ++n) {
+                        rust::Slice<const rust::String> keys, size_t offset, rust::Vec<BoundFaceReference>& references, size_t first, size_t last) {
+  for (size_t n = first; n < last; ++n) {
     check_cancelled();
     const auto& e = edits[n];
     auto *entry = cache ? &cache->edits[n] : nullptr;
@@ -138,10 +138,30 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
       }
       TopoDS_Shape result;
       switch (e.kind) {
-      case 0: case 7: result = move_face(shape, face, e.a,&input_names,&result_names);followed=true; break;
+      case 0: case 7:
+        if (e.kind == 0 && e.copy) {
+          auto plane = edit_plane(face);
+          BRepPrimAPI_MakePrism prism(face,gp_Vec(plane.Axis().Direction()) * (e.a * 1000.));
+          if (!prism.IsDone()) throw std::runtime_error("Face extrusion failed");
+          result = prism.Shape();
+        } else { result = move_face(shape, face, e.a,&input_names,&result_names);followed=true; }
+        break;
       case 1: case 2: {
         TopTools_IndexedMapOfShape edges;
-        TopExp::MapShapes(face.IsNull() ? shape : face, TopAbs_EDGE, edges);
+        if (e.edge_points.empty()) TopExp::MapShapes(face.IsNull() ? shape : face, TopAbs_EDGE, edges);
+        else {
+          TopTools_IndexedMapOfShape candidates; TopExp::MapShapes(shape, TopAbs_EDGE, candidates);
+          for (const auto& p : e.edge_points) {
+            auto vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(p.x*1000.,p.y*1000.,p.z*1000.)).Shape();
+            double best = 1e100; int chosen = 0;
+            for (int i = 1; i <= candidates.Extent(); ++i) {
+              BRepExtrema_DistShapeShape distance(vertex,candidates(i));
+              if (distance.IsDone() && distance.Value() < best) { best = distance.Value(); chosen = i; }
+            }
+            if (!chosen || best > .01) throw std::runtime_error("Selected edge changed; select it again");
+            edges.Add(candidates(chosen));
+          }
+        }
         if (e.a <= 0) throw std::runtime_error("Radius or distance must be positive");
         if (e.kind == 1) {
           BRepFilletAPI_MakeFillet op(shape);
@@ -273,7 +293,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
       if(!followed)result_names=surviving_names(input_names,result);
       if(e.kind==9 || e.kind==10)name_split_branches(result_names,result,e);
       name_generated(result_names,result,std::string(e.identity));
-      if (e.copy && (e.kind==5 || e.kind==12 || e.kind==13)) {
+      if (e.copy && (e.kind==0 || e.kind==5 || e.kind==12 || e.kind==13)) {
         TopoDS_Compound copies; BRep_Builder builder; builder.MakeCompound(copies);
         builder.Add(copies,shape);builder.Add(copies,result);outputs[e.target].shape=copies;outputs[e.target].caps.clear();
         auto original=surviving_names(input_names,shape);

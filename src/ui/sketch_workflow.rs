@@ -39,7 +39,7 @@ impl WorkspaceView {
     fn tool_prompt(&self) -> &'static str {
         match self.tool {
             Tool::Point => "Point · Click to place",
-            Tool::Select => "Select · Shift-click adds · Drag free points or curves",
+            Tool::Select => "Select · Ctrl-click adds · Drag free points or curves",
             Tool::Line => "Line · Click endpoints · Esc to finish",
             Tool::Rectangle => "Rectangle · Click opposite corners",
             Tool::CenterRectangle => "Center rectangle · Click center and corner",
@@ -53,7 +53,7 @@ impl WorkspaceView {
             Tool::Polygon => "Polygon · Click center and corner",
             Tool::Spline => "Spline · Click fit points · Enter to finish",
             Tool::Dimension => "Dimension · Select geometry · Enter value · Enter to confirm",
-            Tool::Measure => "Measure · Select geometry · Shift-click a second entity",
+            Tool::Measure => "Measure · Select geometry · Ctrl-click a second entity",
             Tool::Break => "Break · Click a point inside a line or arc",
             Tool::Trim => "Trim · Click the segment to remove",
             Tool::Extend => "Extend · Click the end to extend",
@@ -101,6 +101,8 @@ impl WorkspaceView {
         suppress: bool,
         cx: &mut Context<Self>,
     ) {
+        let additive =
+            additive || self.pending_constraint.is_some() || self.panel == Some(Panel::Fillet);
         let Some(at) = self.sketch_position(position, suppress) else {
             return;
         };
@@ -186,7 +188,7 @@ impl WorkspaceView {
                     self.selection.push(id)
                 }
                 self.line = curve.filter(|id| d.lines.iter().any(|l| l.id == *id));
-                if self.tool == Tool::Select && !additive {
+                if self.tool == Tool::Select && !additive && self.panel != Some(Panel::Extrude) {
                     let mut points = Vec::new();
                     for id in &self.selection {
                         let curve = crate::sketch::entities::curve_points(&d, *id);
@@ -220,6 +222,9 @@ impl WorkspaceView {
                 }
                 self.line = None;
                 self.marquee = Some((at, at, additive));
+            }
+            if let Some(action) = self.pending_constraint {
+                self.constrain_selection(action, cx);
             }
             if self.tool == Tool::Dimension {
                 self.dimension_edit = None;
@@ -511,7 +516,8 @@ impl WorkspaceView {
             .copied()
             .filter(|id| d.circles.iter().any(|c| c.id == *id))
             .collect();
-        if action == Action::Fixed {
+        if action == Action::Fixed && !selected.is_empty() {
+            self.pending_constraint = None;
             crate::sketch::edit::fixed(&mut d, selected);
             self.commit_sketch(d, cx);
             return;
@@ -524,6 +530,7 @@ impl WorkspaceView {
                     ConstraintKind::Vertical { line }
                 });
             }
+            self.pending_constraint = None;
             self.commit_sketch(d, cx);
             return;
         }
@@ -588,13 +595,15 @@ impl WorkspaceView {
             _ => None,
         };
         if let Some(kind) = kind {
+            self.pending_constraint = None;
+            self.error = None;
             d.constrain(kind);
             self.commit_sketch(d, cx);
         } else {
-            self.error = Some(
-                "Select the required geometry. Shift-click to select multiple points or curves."
-                    .into(),
-            );
+            self.pending_constraint = Some(action);
+            self.tool = Tool::Select;
+            self.status = "Select the required points or curves in order".into();
+            self.error = None;
             cx.notify()
         }
     }
@@ -742,7 +751,7 @@ impl WorkspaceView {
                 axis = Some(line.ends.map(|id| crate::sketch::entities::point(&d, id)));
                 selected.pop();
             } else {
-                self.error = Some("Select geometry, then Shift-click the mirror line".into());
+                self.error = Some("Select geometry, then Ctrl-click the mirror line".into());
                 return;
             }
         }
@@ -947,7 +956,81 @@ impl WorkspaceView {
                 [p[0] + 0.004, p[1] + 0.004]
             })
     }
+    fn poll_drag_solve(&mut self, cx: &mut Context<Self>) {
+        if let Some((mut candidate, result)) =
+            self.drag_solve.as_ref().and_then(|r| r.try_recv().ok())
+        {
+            self.drag_solve = None;
+            if let Some(drag) = &mut self.sketch_drag {
+                if let Ok(solution) = result
+                    && solution.conflicts.is_empty()
+                {
+                    let changed = drag
+                        .before
+                        .points
+                        .iter()
+                        .zip(&solution.points)
+                        .any(|(p, xy)| (p.xy[0] - xy[0]).hypot(p.xy[1] - xy[1]) > 1e-10);
+                    for (p, xy) in candidate.points.iter_mut().zip(&solution.points) {
+                        p.xy = *xy;
+                    }
+                    self.design = candidate;
+                    self.solved = solution.points;
+                    if changed {
+                        if !drag.moved {
+                            self.revision = self.revision.wrapping_add(1);
+                        }
+                        drag.moved = true;
+                        self.dirty_cache.set((u64::MAX, false));
+                    }
+                }
+            }
+        }
+        if self.drag_solve.is_none()
+            && let Some(at) = self.drag_target.take()
+            && let Some(drag) = &self.sketch_drag
+        {
+            let mut candidate = drag.before.clone();
+            let delta = [at[0] - drag.start[0], at[1] - drag.start[1]];
+            let targets: Vec<_> = candidate
+                .points
+                .iter_mut()
+                .filter(|p| drag.points.contains(&p.id))
+                .map(|p| {
+                    p.xy[0] += delta[0];
+                    p.xy[1] += delta[1];
+                    (p.id, p.xy)
+                })
+                .collect();
+            let (send, receive) = std::sync::mpsc::channel();
+            self.drag_solve = Some(receive);
+            std::thread::spawn(move || {
+                let result =
+                    crate::parameters::expression::evaluate(&candidate).and_then(|parameters| {
+                        crate::solver::nonlinear::solve_drag_positions(
+                            &candidate,
+                            &parameters,
+                            &targets,
+                        )
+                    });
+                let _ = send.send((candidate, result));
+            });
+        }
+        if self.drag_released && self.drag_solve.is_none() && self.drag_target.is_none() {
+            self.drag_released = false;
+            self.finish_sketch_drag(false, cx);
+        }
+    }
     fn finish_sketch_drag(&mut self, cancel: bool, cx: &mut Context<Self>) {
+        if cancel {
+            self.drag_target = None;
+            self.drag_solve = None;
+            self.drag_released = false;
+            self.pending_constraint = None;
+        } else if self.drag_solve.is_some() || self.drag_target.is_some() {
+            self.drag_released = true;
+            return;
+        }
         if let Some((id, before, moved)) = self.dimension_drag.take() {
             self.dirty_cache.set((u64::MAX, false));
             if cancel {

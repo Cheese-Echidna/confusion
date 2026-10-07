@@ -42,6 +42,19 @@ mod implementation {
             self.renderer.set_grid(visible, axes);
         }
 
+        pub fn set_style(&mut self, style: crate::render::passes::ViewStyle) {
+            self.renderer.set_style(style);
+        }
+        pub fn clear_preview(&mut self) {
+            self.renderer.clear_preview();
+        }
+        pub fn set_preview(
+            &mut self,
+            vertices: &[crate::render::scene::DemoVertex],
+            indices: &[u32],
+        ) {
+            self.renderer.set_preview(vertices, indices);
+        }
         pub fn set_mesh(&mut self, vertices: &[crate::render::scene::DemoVertex], indices: &[u32]) {
             self.renderer.set_mesh(vertices, indices);
         }

@@ -63,8 +63,8 @@ static TopoDS_Shape gear(double module, int teeth, double height, double bore) {
 static void append_creates(rust::Slice<const ProfileEdge> edges,
                            rust::Slice<const CreateStep> creates,
                            std::vector<Output> &outputs, std::vector<bool> &consumed,
-                           ModelCacheImpl *cache, rust::Slice<const rust::String> keys, size_t offset) {
-  for (size_t index=0;index<creates.size();++index) {
+                           ModelCacheImpl *cache, rust::Slice<const rust::String> keys, size_t offset, size_t first, size_t last) {
+  for (size_t index=first;index<last;++index) {
     check_cancelled();
     try {
       const auto &s = creates[index];
@@ -73,8 +73,8 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
         for (int target : {s.target, s.second_target})
           if (target >= 0 && (static_cast<size_t>(target) >= consumed.size() || consumed[target]))
             throw std::runtime_error("Missing or consumed body");
-        outputs.push_back(detached(entry->output));
-        consumed.push_back(false);
+        outputs[offset+index]=detached(entry->output);
+        consumed[offset+index]=false;
         for (auto target : entry->consumed_targets) consumed.at(target) = true;
         ++cache->reused;
         continue;
@@ -180,10 +180,10 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
       // attachments fail instead of binding silently to unrelated faces.
       Output output{result,{},{}};
       name_generated(output.names,result,std::string(s.identity));
-      outputs.push_back(std::move(output)); consumed.push_back(false);
+      outputs[offset+index]=std::move(output); consumed[offset+index]=false;
       if (entry) {
         entry->key.clear();
-        entry->output = detached(outputs.back());
+        entry->output = detached(outputs[offset+index]);
         entry->consumed_targets.clear();
         for (size_t i = 0; i < previous_consumed.size(); ++i)
           if (!previous_consumed[i] && consumed[i]) entry->consumed_targets.push_back(i);

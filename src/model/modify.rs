@@ -87,6 +87,9 @@ pub struct SolidEdit {
     pub tool: Option<Uuid>,
     /// Face ordinal in the deterministic output before this edit; zero means whole body.
     pub face: u32,
+    /// Selected edge midpoints in SI coordinates; native evaluation checks they still lie on edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_points: Vec<[f64; 3]>,
     /// Semantic kernel provenance; ordinals remain only for legacy files and display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_reference: Option<String>,
@@ -101,6 +104,15 @@ pub struct SolidEdit {
 }
 impl SolidEdit {
     pub fn validate(&self) -> Result<(), String> {
+        if self.edge_points.len() > 10000
+            || self
+                .edge_points
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite() || v.abs() > 1000.)
+        {
+            return Err("Invalid selected edges".into());
+        }
         if [&self.face_reference, &self.tool_reference]
             .into_iter()
             .flatten()
@@ -218,16 +230,12 @@ impl crate::document::schema::Design {
             .map(|f| f.id)
             .chain(self.create_features.iter().map(|f| f.id))
             .collect();
-        let mut available: std::collections::HashSet<_> = self
-            .current_create_bodies()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
         let mut edits = ids.clone();
         if self.solid_edits.len() > 128 || self.materials.len() > 128 {
             return Err("Too many solid edits or materials".into());
         }
         for edit in &self.solid_edits {
+            let mut available = self.bodies_before(edit.id);
             edit.validate()?;
             for (slot, id) in edit.parameters.iter().enumerate() {
                 if let Some(id) = id {

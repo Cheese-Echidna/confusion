@@ -405,6 +405,7 @@ impl Design {
         }
         identities.extend(self.parameters.iter().map(|p| p.id));
         for f in &self.create_features {
+            let upstream = self.bodies_before(f.id);
             if !identities.insert(f.id)
                 || available.contains(&f.id)
                 || self.parameters.iter().any(|p| p.id == f.id)
@@ -461,7 +462,7 @@ impl Design {
                 return Err("Choose a body".into());
             }
             if let Some(id) = f.target {
-                if !available.contains(&id) || consumed.contains(&id) {
+                if !upstream.contains(&id) {
                     return Err("Choose a current upstream body".into());
                 }
                 if f.kind.consumes_body() {
@@ -470,7 +471,7 @@ impl Design {
             }
             if f.kind == CreateKind::BoundaryFill {
                 let id = f.second_target.ok_or("Choose a second body")?;
-                if Some(id) == f.target || !available.contains(&id) || consumed.contains(&id) {
+                if Some(id) == f.target || !upstream.contains(&id) {
                     return Err("Choose a different current upstream body".into());
                 }
                 consumed.insert(id);

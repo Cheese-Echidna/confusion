@@ -94,6 +94,32 @@ impl WorkspaceView {
         }
     }
     fn inspection_lines(&self) -> Vec<String> {
+        if self.inspection_action == Action::Measure && !self.selected_vertices.is_empty() {
+            let points: Vec<_> = self
+                .selected_vertices
+                .iter()
+                .filter_map(|i| self.body_vertices.get(*i))
+                .map(|v| &v.point)
+                .collect();
+            if let [a, b] = points.as_slice() {
+                return vec![format!(
+                    "Distance: {:.4} mm",
+                    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
+                        * 1000.
+                )];
+            }
+            return points
+                .iter()
+                .map(|p| {
+                    format!(
+                        "Vertex: ({:.3}, {:.3}, {:.3}) mm",
+                        p.x * 1000.,
+                        p.y * 1000.,
+                        p.z * 1000.
+                    )
+                })
+                .collect();
+        }
         let Some(data) = &self.inspection else {
             return vec!["Create a solid and wait for evaluation to finish.".into()];
         };

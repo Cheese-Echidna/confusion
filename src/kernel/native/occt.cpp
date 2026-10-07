@@ -2,6 +2,9 @@
 // caches; Rust receives only owned derived results.
 #include "confusion/src/kernel/bridge.rs.h"
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -72,6 +75,7 @@
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
 #include <stdexcept>
 #include <vector>
 #include "cancellation.hpp"
@@ -79,17 +83,17 @@
 namespace confusion {
 constexpr double tau = 6.2831853071795864769;
 static void check_depth(double depth) {
-  if (!std::isfinite(depth) || depth <= 1e-7 || depth > 1000)
+  if (!std::isfinite(depth) || std::abs(depth) <= 1e-7 || std::abs(depth) > 1000)
     throw std::runtime_error(
-        "Extrusion depth must be positive and within modeling limits");
+        "Extrusion depth must be nonzero and within modeling limits");
 }
-static void check_solid(const TopoDS_Shape &shape) {
+static void check_solid(const TopoDS_Shape &shape, bool multiple = false) {
   if (shape.IsNull() || !BRepCheck_Analyzer(shape).IsValid())
     throw std::runtime_error("Feature produced an invalid solid");
   unsigned solids = 0;
   for (TopExp_Explorer i(shape, TopAbs_SOLID); i.More(); i.Next())
     ++solids;
-  if (solids != 1)
+  if (solids == 0 || (!multiple && solids != 1))
     throw std::runtime_error("Feature must produce one connected solid; repair "
                              "the region or target");
 }
@@ -113,6 +117,7 @@ struct Output {
 // OCCT algorithms can update shared topology. Store detached shapes so later
 // operations cannot mutate previously cached results (including cap identities).
 static Output detached(const Output &source) {
+  if (source.shape.IsNull()) return source;
   BRepBuilderAPI_Copy copy(source.shape, true, false);
   Output output{copy.Shape(), source.caps, source.names};
   for (auto &name : output.names) for(auto &face : name.faces) face=copy.ModifiedShape(face);
@@ -151,6 +156,13 @@ size_t ModelCache::reused_features() const { return impl->reused; }
 std::unique_ptr<ModelCache> new_model_cache() { return std::make_unique<ModelCache>(); }
 #include "naming.inc"
 #include "modify.inc"
+static bool planar_surface(const TopoDS_Face& face, gp_Pln& plane) {
+  BRepAdaptor_Surface surface(face);
+  if(surface.GetType()==GeomAbs_Plane){plane=surface.Plane();return true;}
+  GeomLib_IsPlanarSurface check(BRep_Tool::Surface(face),1e-7);
+  if(!check.IsPlanar())return false;
+  plane=check.Plan();return true;
+}
 static Mesh mesh_shape(const TopoDS_Shape &shape,
                        const std::vector<Output> &outputs = {},
                        const std::vector<bool> &consumed = {},
@@ -184,6 +196,12 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
     if (triangles.IsNull())
       throw std::runtime_error("Missing face triangulation");
     ++result.faces;
+    gp_Pln plane;
+    if (planar_surface(face,plane)) { auto n=plane.Axis().Direction();
+      if(face.Orientation()==TopAbs_REVERSED)n.Reverse();
+      auto x=plane.Position().XDirection(); auto y=n.Crossed(x); auto o=plane.Location();
+      result.planar_faces.push_back(PlanarFace{result.faces,PlaneFrame{o.X()*.001,o.Y()*.001,o.Z()*.001,x.X(),x.Y(),x.Z(),y.X(),y.Y(),y.Z(),n.X(),n.Y(),n.Z()}});
+    }
     for (size_t body = 0; body < outputs.size(); ++body)
       if (!consumed[body] && has_face(outputs[body].shape, face))
         result.bodies.push_back(BodyFace{result.faces, static_cast<uint32_t>(body), 0});
@@ -226,6 +244,37 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
       }
     }
   }
+  std::vector<TopoDS_Shape> all_faces;
+  for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) all_faces.push_back(it.Current());
+  auto topology = [&](const TopoDS_Shape& body_shape, uint32_t body, uint32_t part) {
+    TopTools_IndexedMapOfShape edges, vertices;
+    TopExp::MapShapes(body_shape, TopAbs_EDGE, edges);
+    TopExp::MapShapes(body_shape, TopAbs_VERTEX, vertices);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+      auto edge = TopoDS::Edge(edges(i));
+      if (BRep_Tool::Degenerated(edge)) continue;
+      BRepAdaptor_Curve curve(edge);
+      double first = curve.FirstParameter(), last = curve.LastParameter();
+      if (!std::isfinite(first) || !std::isfinite(last)) continue;
+      BodyEdge output; output.body = body; output.part = part; output.ordinal = i;
+      for (size_t f = 0; f < all_faces.size(); ++f) {
+        TopTools_IndexedMapOfShape boundary; TopExp::MapShapes(all_faces[f], TopAbs_EDGE, boundary);
+        if (boundary.Contains(edge)) output.faces.push_back(f + 1);
+      }
+      int samples = curve.GetType() == GeomAbs_Line ? 2 : 65;
+      for (int k = 0; k < samples; ++k) {
+        auto p = curve.Value(first + (last - first) * k / (samples - 1));
+        output.points.push_back(SpatialPoint{p.X()*.001,p.Y()*.001,p.Z()*.001});
+      }
+      result.edges.push_back(std::move(output));
+    }
+    for (int i = 1; i <= vertices.Extent(); ++i) {
+      auto p = BRep_Tool::Pnt(TopoDS::Vertex(vertices(i)));
+      result.corners.push_back(BodyVertex{body,part,SpatialPoint{p.X()*.001,p.Y()*.001,p.Z()*.001}});
+    }
+  };
+  for (size_t i = 0; i < outputs.size(); ++i) if (!consumed[i]) topology(outputs[i].shape, i, 0);
+  for (const auto& piece : pieces) topology(piece.second, piece.first, 1);
   return result;
 }
 struct ProfileCurve { Handle(Geom_Curve) curve; double offset=0, span=1; };
@@ -323,6 +372,18 @@ static TopoDS_Face profile_face(rust::Slice<const ProfileEdge> edges, std::vecto
     throw std::runtime_error("Invalid planar profile");
   return face.Face();
 }
+static gp_Trsf face_frame(const TopoDS_Face &face) {
+  gp_Pln plane;
+  if (!planar_surface(face,plane)) throw std::runtime_error("Sketch support is not planar");
+  auto normal = plane.Axis().Direction();
+  if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+  auto x = plane.Position().XDirection();
+  auto y = normal.Crossed(x);
+  auto o = plane.Location();
+  gp_Trsf transform;
+  transform.SetValues(x.X(),y.X(),normal.X(),o.X(),x.Y(),y.Y(),normal.Y(),o.Y(),x.Z(),y.Z(),normal.Z(),o.Z());
+  return transform;
+}
 static gp_Trsf attachment(const ModelStep &step,
                           const std::vector<Output> &outputs) {
   gp_Trsf transform;
@@ -331,8 +392,16 @@ static gp_Trsf attachment(const ModelStep &step,
       throw std::runtime_error("Invalid origin plane");
     return transform;
   }
-  if (static_cast<size_t>(step.support) >= outputs.size() || step.producer < 0)
+  if (static_cast<size_t>(step.support) >= outputs.size())
     throw std::runtime_error("Missing sketch support");
+  if (!step.reference.empty()) {
+    auto face=resolve_named(outputs,std::vector<bool>(outputs.size(),false),step.support,std::string(step.reference));
+    // Copy/history maps can omit the result face's orientation. Resolve the
+    // outward orientation from the supporting solid before constructing axes.
+    for(TopExp_Explorer it(outputs[step.support].shape,TopAbs_FACE);it.More();it.Next())
+      if(it.Current().IsSame(face))return face_frame(TopoDS::Face(it.Current()));
+    throw std::runtime_error("Missing sketch support face");
+  }
   const Cap *selected = nullptr;
   for (const auto &cap : outputs[step.support].caps)
     if (cap.producer == static_cast<uint32_t>(step.producer) &&
@@ -346,22 +415,9 @@ static gp_Trsf attachment(const ModelStep &step,
         "Sketch support face was deleted; reattach sketch");
   if (selected->faces.size() != 1)
     throw std::runtime_error("Sketch support face split; reattach sketch");
-  const auto face = TopoDS::Face(selected->faces[0]);
-  BRepAdaptor_Surface surface(face);
-  if (surface.GetType() != GeomAbs_Plane)
-    throw std::runtime_error("Sketch support is not planar");
-  auto plane = surface.Plane();
-  auto normal = plane.Axis().Direction();
-  if (face.Orientation() == TopAbs_REVERSED)
-    normal.Reverse();
-  // Preserve the producing plane's local origin and X axis as dimensions
-  // change.
-  auto x = plane.Position().XDirection();
-  auto y = normal.Crossed(x);
-  auto o = plane.Location();
-  transform.SetValues(x.X(), y.X(), normal.X(), o.X(), x.Y(), y.Y(), normal.Y(),
-                      o.Y(), x.Z(), y.Z(), normal.Z(), o.Z());
-  return transform;
+  for(TopExp_Explorer it(outputs[step.support].shape,TopAbs_FACE);it.More();it.Next())
+    if(it.Current().IsSame(selected->faces[0]))return face_frame(TopoDS::Face(it.Current()));
+  throw std::runtime_error("Missing sketch support face");
 }
 template <class Boolean>
 static std::vector<Cap> follow_caps(Boolean &operation,
@@ -413,11 +469,12 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
       cache->edits.resize(edits.size());
     }
     check_cancelled();
-    std::vector<Output> outputs;
-    std::vector<bool> consumed;
+    std::vector<Output> outputs(steps.size()+creates.size());
+    std::vector<bool> consumed(steps.size()+creates.size(), true);
     std::vector<std::pair<size_t, TopoDS_Shape>> pieces;
-    std::vector<gp_Trsf> frames;
-    for (size_t index = 0; index < steps.size(); ++index) {
+    std::vector<gp_Trsf> frames(planes.size());
+    rust::Vec<BoundFaceReference> references;
+    auto extrusion = [&](size_t index) {
       check_cancelled();
       const auto &step = steps[index];
       FeatureEntry *entry = cache ? &cache->features[index] : nullptr;
@@ -425,15 +482,15 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
         if (step.operation != 0 && (step.target < 0 ||
             static_cast<size_t>(step.target) >= consumed.size() || consumed[step.target]))
           throw std::runtime_error("Missing or consumed target body");
-        outputs.push_back(detached(entry->output));
-        consumed.push_back(false);
+        outputs[index] = detached(entry->output);
+        consumed[index] = false;
         if (step.operation != 0) consumed.at(step.target) = true;
         for (const auto &piece : entry->pieces) {
           BRepBuilderAPI_Copy copy(piece.second, true, false);
           pieces.emplace_back(piece.first, copy.Shape());
         }
         ++cache->reused;
-        continue;
+        return;
       }
       const auto piece_start = pieces.size();
       try {
@@ -443,7 +500,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
           throw std::runtime_error("Invalid profile range");
         if (step.operation > 3)
           throw std::runtime_error("Unknown extrusion operation");
-        auto transform = attachment(step, outputs);
+        auto transform = step.plane >= 0 ? frames.at(step.plane) : attachment(step, outputs);
         std::vector<std::pair<std::string,TopoDS_Shape>> profile_names;
         auto local = profile_face(rust::Slice<const ProfileEdge>(
             edges.data() + step.edge_start, step.edge_count), &profile_names);
@@ -518,7 +575,9 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
             output.caps = follow_caps(op, caps, output.shape);
             output.names = follow_names(op, names, output.shape);
           }
-          check_solid(output.shape);
+          unsigned target_solids=0;
+          for(TopExp_Explorer it(outputs[step.target].shape,TopAbs_SOLID);it.More();it.Next())++target_solids;
+          check_solid(output.shape,target_solids>1);
           BRepGProp::VolumeProperties(output.shape, after);
           if (std::abs(after.Mass() - before.Mass()) < 1e-6)
             throw std::runtime_error("Feature does not change the target body");
@@ -534,8 +593,8 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
           }
           entry->key = std::string(keys[index]);
         }
-        outputs.push_back(std::move(output));
-        consumed.push_back(false);
+        outputs[index] = std::move(output);
+        consumed[index] = false;
       } catch (const Standard_Failure &e) {
         throw std::runtime_error("Feature " + std::to_string(index + 1) + ": " +
                                  e.GetMessageString());
@@ -543,23 +602,24 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
         throw std::runtime_error("Feature " + std::to_string(index + 1) + ": " +
                                  e.what());
       }
-    }
-    append_creates(edges, creates, outputs, consumed, cache, keys, steps.size());
-    for (size_t i = 0; i < planes.size(); ++i) {
-      check_cancelled();
-      ModelStep plane{};
-      plane.support = planes[i].support;
-      plane.producer = planes[i].producer;
-      plane.role = planes[i].role;
-      try {
-        frames.push_back(attachment(plane, outputs));
-      } catch (const std::exception &e) {
-        throw std::runtime_error("Sketch support " + std::to_string(i + 1) +
-                                 ": " + e.what());
+    };
+    struct Event { uint32_t sequence; unsigned kind; size_t index; };
+    std::vector<Event> events;
+    for(size_t i=0;i<steps.size();++i)events.push_back({steps[i].sequence,0,i});
+    for(size_t i=0;i<creates.size();++i)events.push_back({creates[i].sequence,1,i});
+    for(size_t i=0;i<planes.size();++i)events.push_back({planes[i].sequence,2,i});
+    for(size_t i=0;i<edits.size();++i)events.push_back({edits[i].sequence,3,i});
+    std::stable_sort(events.begin(),events.end(),[](const Event&a,const Event&b){return a.sequence<b.sequence;});
+    for(const auto &event:events) {
+      auto i=event.index;
+      if(event.kind==0)extrusion(i);
+      else if(event.kind==1)append_creates(edges,creates,outputs,consumed,cache,keys,steps.size(),i,i+1);
+      else if(event.kind==3)apply_edits(outputs,consumed,edits,cache,keys,steps.size()+creates.size(),references,i,i+1);
+      else {
+        ModelStep plane{}; plane.support=planes[i].support; plane.producer=planes[i].producer; plane.role=planes[i].role; plane.reference=planes[i].reference;
+        frames[i]=attachment(plane,outputs);
       }
     }
-    rust::Vec<BoundFaceReference> references;
-    apply_edits(outputs, consumed, edits, cache, keys, steps.size() + creates.size(),references);
     TopoDS_Compound combined;
     BRep_Builder builder;
     builder.MakeCompound(combined);

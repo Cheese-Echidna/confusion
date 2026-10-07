@@ -89,9 +89,21 @@ impl WorkspaceView {
         if self.pending_candidate.is_some() {
             return;
         }
+        let result = self
+            .extrusion_preview_candidate
+            .clone()
+            .filter(|_| self.extrusion_preview_key == self.current_extrusion_preview_key(cx))
+            .map(Ok)
+            .unwrap_or_else(|| self.create_candidate(cx));
+        match result {
+            Ok(candidate) => self.validate_candidate(candidate, cx),
+            Err(error) => self.error = Some(error),
+        }
+    }
+    fn create_candidate(&self, cx: &App) -> Result<Design, String> {
         use crate::model::solid_create::{CreateFeature, CreateKind, Unit};
         let Some(editor) = &self.create_editor else {
-            return;
+            return Err("Choose a Create tool".into());
         };
         let mut candidate = self.design.clone();
         let existing = editor
@@ -195,7 +207,8 @@ impl WorkspaceView {
             candidate.create_features.push(feature);
         }
         candidate.sync_construction();
-        self.validate_candidate(candidate, cx);
+        candidate.validate()?;
+        Ok(candidate)
     }
     fn create_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::model::solid_create::CreateKind;

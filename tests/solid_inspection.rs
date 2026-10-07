@@ -26,6 +26,9 @@ fn edges(x: f64) -> Vec<ffi::ProfileEdge> {
 }
 fn step(start: u32) -> ffi::ModelStep {
     ffi::ModelStep {
+        plane: -1,
+        sequence: 0,
+        reference: String::new(),
         identity: String::new(),
         edge_start: start,
         edge_count: 4,

@@ -29,6 +29,7 @@ fn edit(target: Uuid, kind: ModifyKind, key: String, values: [f64; 4]) -> SolidE
         target,
         tool: None,
         face: 99999,
+        edge_points: vec![],
         face_reference: Some(key),
         tool_reference: None,
         values,

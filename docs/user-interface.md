@@ -140,3 +140,19 @@ nix-shell --run 'python3 examples/sketch_region_review.py'
 ```
 
 It uses an isolated instrumented application and configuration directory, with assertions in the real workspace.
+
+### Face sketching, extrusion previews, and display styles
+
+Choose **Create sketch**, then click the flat face to use. Faces from extrusions, Create operations, and solid edits supply a local sketch plane. **Use XY plane** chooses the origin plane.
+
+The extrusion editor shows the resulting object live, including the material removed by a cut, plus the yellow direction handle. Enter a negative depth to reverse direction. Previews leave the document and undo history unchanged. Apply validates the proposed solid and hides the consumed sketch; select the sketch in the tree to edit it again, or use its visibility control to show it. Escape restores the committed object.
+
+The View menu offers **Shaded**, **Shaded with edges**, **Shaded with hidden edges**, **Wireframe**, and **Visible edges only**. Edges follow face boundaries and curved silhouettes, excluding flat triangulation diagonals. Hidden edges use dashed lines. All styles retain the same face picking.
+
+Extrude can be opened before selecting a sketch region or a planar body face. **E** starts a new operation; edit existing features through the timeline. The extrusion axis projects vertically upward while the sketch remains visible at an angle. The larger yellow arrow controls depth. Face extrusion supports Join, Cut and New body; Cut and new body is currently available for sketch profiles.
+
+Use **Ctrl-click** to add or remove selections. Constraint tools accept either geometry first or tool first; tool-first picking accumulates the required entities without a modifier. Sketch fillet likewise accepts two consecutive edge picks. In solid view, click exact body edges or vertices. Fillet and chamfer accumulate edge selections without a modifier. Ctrl-click adds vertices, and Measure reports the distance between two selected vertices.
+
+Create and Modify parameters have draggable pull tabs next to the geometry, with number/expression fields still available in the editor. Drag horizontally: length parameters change by 0.1 mm per pixel, angles by 1 degree per pixel, and scalar values by 0.01 per pixel. Solid tools evaluate their previews in the background and retain the previous completed preview during a drag. Selected fillet edges are checked against the evaluated geometry; reselect them if an upstream edit moves those edges.
+
+Sketch dragging solves on a background thread and coalesces pointer events. Releasing the mouse waits asynchronously for the final target before making one undoable edit. Positive line lengths, circle radii, ellipse axes and spline spans are intrinsic solver conditions with no constraint glyph. Fillets remove unused corner points. Rectangle selection draws only the rectangle outline.

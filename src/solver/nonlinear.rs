@@ -17,6 +17,13 @@ mod implementation {
         pub point_dof: Vec<usize>,
         pub redundant: Vec<Uuid>,
     }
+    /// Interactive positions and feasibility without expensive rank diagnostics.
+    #[derive(Clone, Debug)]
+    pub struct DragSolution {
+        pub points: Vec<[f64; 2]>,
+        pub conflicts: Vec<Uuid>,
+        pub residual: f64,
+    }
     struct Row {
         id: Uuid,
         value: f64,
@@ -168,6 +175,54 @@ mod implementation {
                 jac,
             });
         }
+        // Intrinsic inequalities stay inactive for ordinary geometry and have no icons.
+        // Work in millimetres; keep a small positive margin above kernel tolerance.
+        let spans = d
+            .lines
+            .iter()
+            .map(|l| (l.id, l.ends))
+            .chain(d.circles.iter().map(|c| (c.id, [c.center, c.rim])))
+            .chain(
+                d.ellipses
+                    .iter()
+                    .flat_map(|e| [(e.id, [e.center, e.major]), (e.id, [e.center, e.minor])]),
+            )
+            .chain(
+                d.splines
+                    .iter()
+                    .flat_map(|s| s.points.windows(2).map(move |p| (s.id, [p[0], p[1]]))),
+            );
+        for (id, ends) in spans {
+            let [a, b] = ends.map(point);
+            let dx = x[b] - x[a];
+            let dy = x[b + 1] - x[a + 1];
+            let len = dx.hypot(dy);
+            const MIN_SPAN: f64 = 0.0002;
+            if len < MIN_SPAN {
+                let seed = [
+                    d.points[b / 2].xy[0] - d.points[a / 2].xy[0],
+                    d.points[b / 2].xy[1] - d.points[a / 2].xy[1],
+                ];
+                let seed_len = seed[0].hypot(seed[1]);
+                let direction = if len > 1e-12 {
+                    [dx / len, dy / len]
+                } else if seed_len > 1e-12 {
+                    [seed[0] / seed_len, seed[1] / seed_len]
+                } else {
+                    [1., 0.]
+                };
+                let mut jac = vec![0.; x.len()];
+                for k in 0..2 {
+                    jac[a + k] = -direction[k];
+                    jac[b + k] = direction[k];
+                }
+                result.push(Row {
+                    id,
+                    value: len - MIN_SPAN,
+                    jac,
+                });
+            }
+        }
         result
     }
     pub fn solve(d: &Design, p: &HashMap<Uuid, f64>) -> Result<Solution, String> {
@@ -178,7 +233,7 @@ mod implementation {
         p: &HashMap<Uuid, f64>,
         cancelled: impl Fn() -> bool,
     ) -> Result<Solution, String> {
-        solve_internal(d, p, cancelled, &[])
+        solve_internal(d, p, cancelled, &[], true)
     }
     /// Temporary soft targets influence only the preview solution, never the design constraints.
     pub fn solve_drag(
@@ -191,13 +246,31 @@ mod implementation {
         }) {
             return Err("Invalid drag target".into());
         }
-        solve_internal(d, p, || false, targets)
+        solve_internal(d, p, || false, targets, true)
+    }
+    pub fn solve_drag_positions(
+        d: &Design,
+        p: &HashMap<Uuid, f64>,
+        targets: &[(Uuid, [f64; 2])],
+    ) -> Result<DragSolution, String> {
+        if targets.iter().any(|(id, xy)| {
+            !d.points.iter().any(|p| p.id == *id) || xy.iter().any(|v| !v.is_finite())
+        }) {
+            return Err("Invalid drag target".into());
+        }
+        let solution = solve_internal(d, p, || false, targets, false)?;
+        Ok(DragSolution {
+            points: solution.points,
+            conflicts: solution.conflicts,
+            residual: solution.residual,
+        })
     }
     fn solve_internal(
         d: &Design,
         p: &HashMap<Uuid, f64>,
         cancelled: impl Fn() -> bool,
         targets: &[(Uuid, [f64; 2])],
+        diagnostics: bool,
     ) -> Result<Solution, String> {
         d.validate()?;
         if d.parameters
@@ -296,6 +369,27 @@ mod implementation {
             return Err("Solver diverged outside supported coordinate range".into());
         }
         let r = rows(d, &x, p);
+        if !diagnostics {
+            // Dragging needs positions and feasibility; rank/redundancy are recomputed on release.
+            let mut conflicts: Vec<_> = r
+                .iter()
+                .filter(|r| r.value.abs() > 1e-5)
+                .map(|r| r.id)
+                .collect();
+            conflicts.sort();
+            conflicts.dedup();
+            return Ok(Solution {
+                points: x
+                    .chunks_exact(2)
+                    .map(|p| [p[0] * 0.001, p[1] * 0.001])
+                    .collect(),
+                dof: 0,
+                point_dof: vec![],
+                redundant: vec![],
+                conflicts,
+                residual: r.iter().map(|r| r.value.abs() * 0.001).fold(0., f64::max),
+            });
+        }
         let mut freedom = vec![true; n];
         let rank = if r.is_empty() {
             0

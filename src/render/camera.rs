@@ -109,15 +109,17 @@ impl Camera {
     }
 
     pub fn zoom(&mut self, scroll_pixels: f64) {
-        self.distance = (self.distance * (-scroll_pixels * 0.0025).exp()).clamp(1.5, 100.0);
+        self.distance = (self.distance * (-scroll_pixels * 0.0025).exp()).clamp(0.01, 100.0);
     }
 
     pub fn view_projection(&self, width: u32, height: u32) -> Matrix4<f64> {
         let aspect = width.max(1) as f64 / height.max(1) as f64;
         let view = Matrix4::look_at_rh(&self.eye(), &self.target, &self.up());
+        // Follow zoom so close details stay visible without sacrificing distant depth precision.
+        let near = (self.distance * 1e-4).clamp(1e-5, 0.01);
         let projection = match self.projection {
             ProjectionMode::Perspective => {
-                Perspective3::new(aspect, Self::FIELD_OF_VIEW, 0.05, 500.0).to_homogeneous()
+                Perspective3::new(aspect, Self::FIELD_OF_VIEW, near, 500.0).to_homogeneous()
             }
             ProjectionMode::Orthographic => {
                 let half_height = self.distance * (Self::FIELD_OF_VIEW / 2.0).tan();
@@ -126,7 +128,7 @@ impl Camera {
                     half_height * aspect,
                     -half_height,
                     half_height,
-                    0.05,
+                    near,
                     500.0,
                 )
                 .to_homogeneous()
@@ -215,6 +217,37 @@ mod tests {
                 .unwrap();
             assert!((hit[0] - at[0]).hypot(hit[1] - at[1]) < 1e-10);
         }
+    }
+
+    #[test]
+    fn extrusion_normal_projects_up_with_the_profile_visible() {
+        for normal in [Vector3::x(), Vector3::y(), Vector3::z()] {
+            let x = if normal == Vector3::x() {
+                Vector3::y()
+            } else {
+                Vector3::x()
+            };
+            let y = normal.cross(&x);
+            let mut camera = Camera::default();
+            camera.set_direction(x - y + normal * 0.65, normal);
+            let base = camera.project(camera.target, [800, 600]).unwrap();
+            let tip = camera
+                .project(camera.target + normal * 0.1, [800, 600])
+                .unwrap();
+            assert!((base[0] - tip[0]).abs() < 1e-10);
+            assert!(tip[1] < base[1]);
+            assert!(camera.outward().dot(&normal).abs() > 0.1);
+        }
+    }
+
+    #[test]
+    fn geometry_close_to_the_eye_is_not_prematurely_clipped() {
+        let camera = Camera::default();
+        assert!(
+            camera
+                .project(camera.eye() - camera.outward() * 0.001, [800, 600])
+                .is_some()
+        );
     }
 
     #[test]

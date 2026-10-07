@@ -191,6 +191,7 @@ fn create_and_modify_checkpoints_match_full_rebuild() {
         target: body,
         tool: None,
         face: 0,
+        edge_points: vec![],
         face_reference: None,
         tool_reference: None,
         values: [1.2, 0., 0., 0.],

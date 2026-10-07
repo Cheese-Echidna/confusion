@@ -52,17 +52,19 @@ impl ExtrudeGizmo {
                 if let (Some(a), Some(b)) =
                     (screen(self.center, 0.), screen(self.center, self.depth))
                 {
-                    stroke(a, b, 2., window);
+                    stroke(a, b, 4., window);
                     let delta = b - a;
                     let len = f64::from(delta.x).hypot(f64::from(delta.y)).max(1.) as f32;
                     let tangent = delta / len;
                     let normal = point(-tangent.y, tangent.x);
-                    stroke(b, b - tangent * 10. + normal * 5., 2., window);
-                    stroke(b, b - tangent * 10. - normal * 5., 2., window);
-                    window.paint_quad(fill(
-                        Bounds::new(b - point(px(4.), px(4.)), size(px(8.), px(8.))),
-                        rgb(super::theme::WARNING),
-                    ));
+                    let mut head = PathBuilder::fill();
+                    head.move_to(b);
+                    head.line_to(b - tangent * 22. + normal * 11.);
+                    head.line_to(b - tangent * 22. - normal * 11.);
+                    head.line_to(b);
+                    if let Ok(head) = head.build() {
+                        window.paint_path(head, rgb(super::theme::WARNING));
+                    }
                 }
             },
         )

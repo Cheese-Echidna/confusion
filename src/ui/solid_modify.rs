@@ -109,7 +109,10 @@ impl WorkspaceView {
         self.solid_editor.reference = edit.face_reference.clone();
         // Repair against the model before the edit, including failed documents.
         self.design.sync_construction();
-        let previous = self.design.construction.iter()
+        let previous = self
+            .design
+            .construction
+            .iter()
             .position(|feature| feature.id == id)
             .and_then(|index| index.checked_sub(1))
             .map(|index| self.design.construction[index].id);
@@ -190,7 +193,7 @@ impl WorkspaceView {
         index: usize,
         angular: bool,
         scalar: bool,
-        cx: &Context<Self>,
+        cx: &App,
     ) -> Result<f64, String> {
         let text = self.solid_editor.fields[index].read(cx).content.to_string();
         let mut d = Design {
@@ -214,7 +217,19 @@ impl WorkspaceView {
         if self.pending_candidate.is_some() {
             return;
         }
-        let result = (|| {
+        let result = self
+            .extrusion_preview_candidate
+            .clone()
+            .filter(|_| self.extrusion_preview_key == self.current_extrusion_preview_key(cx))
+            .map(Ok)
+            .unwrap_or_else(|| self.solid_modify_candidate(cx));
+        match result {
+            Ok(candidate) => self.validate_candidate(candidate, cx),
+            Err(error) => self.error = Some(error),
+        }
+    }
+    fn solid_modify_candidate(&self, cx: &App) -> Result<Design, String> {
+        (|| {
             let kind = self.solid_editor.kind;
             let target = self
                 .solid_editor
@@ -291,14 +306,42 @@ impl WorkspaceView {
                 kind,
                 target,
                 tool: self.solid_editor.tool,
-                face: if kind.uses_face() { self.selected } else { 0 },
-                face_reference: if !kind.uses_face() {
+                edge_points: if matches!(kind, ModifyKind::Fillet | ModifyKind::Chamfer) {
+                    self.selected_edges
+                        .iter()
+                        .filter_map(|i| self.body_edges.get(*i))
+                        .filter_map(|e| {
+                            if e.points.len() == 2 {
+                                let a = &e.points[0];
+                                let b = &e.points[1];
+                                Some([(a.x + b.x) / 2., (a.y + b.y) / 2., (a.z + b.z) / 2.])
+                            } else {
+                                e.points.get(e.points.len() / 2).map(|p| [p.x, p.y, p.z])
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                },
+                face: if kind.uses_face() && self.selected_edges.is_empty() {
+                    self.selected
+                } else {
+                    0
+                },
+                face_reference: if !kind.uses_face()
+                    || (matches!(kind, ModifyKind::Fillet | ModifyKind::Chamfer)
+                        && !self.selected_edges.is_empty())
+                {
                     None
                 } else if self.selected == 0 {
                     self.solid_editor.reference.clone()
                 } else {
-                    Some(self.face_names.get(&self.selected).cloned()
-                        .ok_or("Selected face is ambiguous; choose a uniquely named face")?)
+                    Some(
+                        self.face_names
+                            .get(&self.selected)
+                            .cloned()
+                            .ok_or("Selected face is ambiguous; choose a uniquely named face")?,
+                    )
                 },
                 tool_reference: if kind == ModifyKind::ReplaceFace {
                     self.face_names.get(&(values[1] as u32)).cloned()
@@ -319,11 +362,7 @@ impl WorkspaceView {
             candidate.sync_construction();
             candidate.validate()?;
             Ok(candidate)
-        })();
-        match result {
-            Ok(candidate) => self.validate_candidate(candidate, cx),
-            Err(error) => self.error = Some(error),
-        }
+        })()
     }
     fn apply_material(&mut self, cx: &mut Context<Self>) {
         let result = (|| {
@@ -448,7 +487,7 @@ impl WorkspaceView {
             content = content.child(format!("Selected face: {}", self.selected));
             let help = match kind {
                 ModifyKind::Fillet | ModifyKind::Chamfer => {
-                    "Select a face to edit its boundary edges, or clear selection for all edges."
+                    "Click the edges to round or bevel. Drag the radius or distance tab beside the body."
                 }
                 ModifyKind::PressPull | ModifyKind::OffsetFace => {
                     "Select a planar face. Positive distance adds material; negative removes it."

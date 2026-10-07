@@ -30,6 +30,9 @@ pub mod ffi {
         to: f64,
     }
     struct ModelStep {
+        plane: i32,
+        reference: String,
+        sequence: u32,
         identity: String,
         edge_start: u32,
         edge_count: u32,
@@ -41,9 +44,11 @@ pub mod ffi {
         role: u32,
     }
     struct ModifyStep {
+        sequence: u32,
         identity: String,
         face_reference: String,
         tool_reference: String,
+        edge_points: Vec<SpatialPoint>,
         kind: u32,
         target: u32,
         tool: i32,
@@ -56,6 +61,7 @@ pub mod ffi {
         mode: u32,
     }
     struct CreateStep {
+        sequence: u32,
         identity: String,
         kind: u32,
         edge_start: u32,
@@ -67,6 +73,8 @@ pub mod ffi {
         values: Vec<f64>,
     }
     struct FaceRequest {
+        reference: String,
+        sequence: u32,
         support: i32,
         producer: i32,
         role: u32,
@@ -155,7 +163,35 @@ pub mod ffi {
         ambiguous: bool,
     }
     #[derive(Clone)]
+    struct PlanarFace {
+        face: u32,
+        frame: PlaneFrame,
+    }
+    #[derive(Clone)]
+    struct SpatialPoint {
+        x: f64,
+        y: f64,
+        z: f64,
+    }
+    #[derive(Clone)]
+    struct BodyEdge {
+        body: u32,
+        part: u32,
+        ordinal: u32,
+        faces: Vec<u32>,
+        points: Vec<SpatialPoint>,
+    }
+    #[derive(Clone)]
+    struct BodyVertex {
+        body: u32,
+        part: u32,
+        point: SpatialPoint,
+    }
+    #[derive(Clone)]
     struct Mesh {
+        edges: Vec<BodyEdge>,
+        corners: Vec<BodyVertex>,
+        planar_faces: Vec<PlanarFace>,
         names: Vec<NamedFace>,
         references: Vec<BoundFaceReference>,
         inspection: Inspection,

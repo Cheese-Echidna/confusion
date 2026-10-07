@@ -24,6 +24,7 @@ fn edit(target: Uuid, kind: ModifyKind, face: u32, values: [f64; 4]) -> SolidEdi
         target,
         tool: None,
         face,
+        edge_points: vec![],
         face_reference: None,
         tool_reference: None,
         values,
@@ -350,4 +351,81 @@ mod exact {
         assert_eq!(d.through_feature(id).unwrap().solid_edits.len(), 0);
         assert_eq!(d.through_feature(eid).unwrap().solid_edits.len(), 1);
     }
+}
+
+#[cfg(all(feature = "solver", feature = "kernel"))]
+#[test]
+fn exact_body_topology_and_selected_edge_fillet_survive_cached_evaluation() {
+    use confusion::evaluation::{cache::EvaluationCache, solid};
+    let (mut d, id) = base();
+    let mut cache = EvaluationCache::default();
+    let initial = solid::evaluate_cached(&d, || false, &mut cache)
+        .unwrap()
+        .mesh
+        .unwrap();
+    assert_eq!(initial.edges.len(), 12);
+    assert_eq!(initial.corners.len(), 8);
+    assert!(initial.edges.iter().all(|e| e.faces.len() == 2));
+    let edges: Vec<_> = initial
+        .edges
+        .iter()
+        .filter(|e| e.points.iter().all(|p| (p.z - 0.01).abs() < 1e-8))
+        .collect();
+    // Use a point strictly inside the line, so matching never chooses an adjacent edge.
+    let midpoint = |i: usize| {
+        let a = &edges[i].points[0];
+        let b = edges[i].points.last().unwrap();
+        [(a.x + b.x) / 2., (a.y + b.y) / 2., (a.z + b.z) / 2.]
+    };
+    let mut feature = edit(id, ModifyKind::Fillet, 0, [0.001, 0., 0., 0.]);
+    feature.edge_points = vec![midpoint(0)];
+    d.solid_edits.push(feature);
+    let first = solid::evaluate_cached(&d, || false, &mut cache)
+        .unwrap()
+        .mesh
+        .unwrap();
+    assert!(first.volume < initial.volume);
+    assert_eq!(first.faces, initial.faces + 1);
+    d.solid_edits[0].edge_points = vec![midpoint(1)];
+    let second = solid::evaluate_cached(&d, || false, &mut cache)
+        .unwrap()
+        .mesh
+        .unwrap();
+    assert_eq!(second.faces, initial.faces + 1);
+    let fresh = solid::evaluate(&d, || false).unwrap().mesh.unwrap();
+    assert!((second.volume - fresh.volume).abs() < 1e-12);
+    assert_eq!(
+        second
+            .vertices
+            .iter()
+            .map(|v| (v.x, v.y, v.z))
+            .collect::<Vec<_>>(),
+        fresh
+            .vertices
+            .iter()
+            .map(|v| (v.x, v.y, v.z))
+            .collect::<Vec<_>>()
+    );
+    d.solid_edits[0].edge_points[0] = [0.5, 0.5, 0.5];
+    assert!(
+        solid::evaluate(&d, || false)
+            .err()
+            .unwrap()
+            .contains("select it again")
+    );
+}
+
+#[cfg(all(feature = "solver", feature = "kernel"))]
+#[test]
+fn face_extrusion_can_create_a_separate_solid() {
+    use confusion::evaluation::solid;
+    let (mut d, id) = base();
+    let initial = solid::evaluate(&d, || false).unwrap().mesh.unwrap();
+    let face = initial.vertices.iter().find(|v| v.nz > 0.99).unwrap().face;
+    let mut feature = edit(id, ModifyKind::PressPull, face, [0.005, 0., 0., 0.]);
+    feature.copy = true;
+    d.solid_edits.push(feature);
+    let changed = solid::evaluate(&d, || false).unwrap().mesh.unwrap();
+    assert!((changed.volume - initial.volume * 1.5).abs() < 1e-10);
+    assert_eq!(changed.inspection.solids, 2);
 }

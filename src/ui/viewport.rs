@@ -20,7 +20,7 @@ mod implementation {
         view_cube,
     };
     use crate::{
-        document::model::{CapRole, ExtrudeFeature, ExtrudeOperation, SketchPlane},
+        document::model::{ExtrudeFeature, ExtrudeOperation, SketchPlane},
         document::schema::{ConstraintKind, ConstructionKind, Design, Extrusion},
         runtime::worker::Worker,
         ui::text_input::TextInput,
@@ -107,6 +107,27 @@ mod implementation {
         recovery_check: std::time::Instant,
         recovery_tracked: HashSet<Uuid>,
         dirty_cache: Cell<(u64, bool)>,
+        body_edges: Vec<crate::kernel::bridge::ffi::BodyEdge>,
+        body_vertices: Vec<crate::kernel::bridge::ffi::BodyVertex>,
+        selected_edges: Vec<usize>,
+        selected_vertices: Vec<usize>,
+        extrusion_face: Option<u32>,
+        parameter_drag: Option<(
+            Entity<TextInput>,
+            Point<Pixels>,
+            f64,
+            crate::model::solid_create::Unit,
+            bool,
+        )>,
+        pending_constraint: Option<Action>,
+        drag_solve: Option<
+            std::sync::mpsc::Receiver<(
+                Design,
+                Result<crate::solver::nonlinear::DragSolution, String>,
+            )>,
+        >,
+        drag_target: Option<[f64; 2]>,
+        drag_released: bool,
         extrude_drag: Option<(Point<Pixels>, f64, [f64; 2])>,
         create_editor: Option<CreateEditor>,
         gpu: GpuViewport,
@@ -115,6 +136,12 @@ mod implementation {
         body_faces: std::collections::HashMap<u32, (Uuid, u32)>,
         face_names: std::collections::HashMap<u32, String>,
         hidden_sketches: HashSet<Uuid>,
+        face_planes: std::collections::HashMap<u32, crate::kernel::bridge::ffi::PlaneFrame>,
+        view_style: crate::render::passes::ViewStyle,
+        extrusion_preview_key: String,
+        extrusion_preview_revision: Option<u64>,
+        extrusion_preview_candidate: Option<Design>,
+        extrusion_preview_error: Option<String>,
         hidden_bodies: HashSet<(Uuid, u32)>,
         align_sketch_pending: bool,
         frame_rate: crate::ui::frame_rate::FrameRate,
@@ -224,6 +251,8 @@ mod implementation {
     include!("solid_create.rs");
     include!("solid_modify.rs");
     include!("solid_inspect.rs");
+    include!("parameter_gizmo.rs");
+    include!("topology_selection.rs");
     include!("step_exchange.rs");
 
     impl WorkspaceView {
@@ -263,6 +292,16 @@ mod implementation {
                 recovery_check: std::time::Instant::now(),
                 recovery_tracked: HashSet::new(),
                 dirty_cache: Cell::new((u64::MAX, false)),
+                body_edges: vec![],
+                body_vertices: vec![],
+                selected_edges: vec![],
+                selected_vertices: vec![],
+                extrusion_face: None,
+                parameter_drag: None,
+                pending_constraint: None,
+                drag_solve: None,
+                drag_target: None,
+                drag_released: false,
                 extrude_drag: None,
                 create_editor: None,
                 gpu,
@@ -271,6 +310,12 @@ mod implementation {
                 body_faces: Default::default(),
                 face_names: Default::default(),
                 hidden_sketches: Default::default(),
+                face_planes: Default::default(),
+                view_style: Default::default(),
+                extrusion_preview_key: String::new(),
+                extrusion_preview_revision: None,
+                extrusion_preview_candidate: None,
+                extrusion_preview_error: None,
                 hidden_bodies: Default::default(),
                 align_sketch_pending: false,
                 frame_rate: Default::default(),
@@ -506,6 +551,15 @@ mod implementation {
         }
         fn candidate_context(&self, cx: &App) -> String {
             match self.panel {
+                Some(Panel::Extrude) => format!(
+                    "extrude:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                    self.depth.read(cx).content,
+                    self.extrude_operation,
+                    (self.extrude_target, self.extrusion_face),
+                    self.editing_feature,
+                    self.sketch_region.as_ref().map(|r| &r.boundary),
+                    self.selection
+                ),
                 Some(Panel::Create) => self.create_editor.as_ref().map_or_else(String::new, |e| {
                     format!(
                         "create:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
@@ -525,14 +579,14 @@ mod implementation {
                 Some(Panel::SolidModify) => {
                     let e = &self.solid_editor;
                     format!(
-                        "modify:{:?}:{:?}:{:?}:{:?}:{}:{}:{}:{:?}",
+                        "modify:{:?}:{:?}:{:?}:{:?}:{}:{}:{:?}:{:?}",
                         e.kind,
                         e.editing,
                         e.target,
                         e.tool,
                         e.copy,
                         e.mode,
-                        self.selected,
+                        (self.selected, &self.selected_edges),
                         e.fields
                             .iter()
                             .map(|f| f.read(cx).content.to_string())
@@ -567,14 +621,23 @@ mod implementation {
             self.redo.clear();
         }
         fn rebuild(&mut self, cx: &mut Context<Self>) {
+            self.gpu.clear_preview();
+            self.extrusion_preview_revision = None;
+            self.extrusion_preview_key.clear();
+            self.extrusion_preview_candidate = None;
             self.cancel_candidate();
             self.sketch_region = None;
             self.revision = self.revision.wrapping_add(1);
             self.changed_camera();
             self.selected = 0;
             self.face_anchors.clear();
+            self.body_edges.clear();
+            self.body_vertices.clear();
+            self.selected_edges.clear();
+            self.selected_vertices.clear();
             self.body_faces.clear();
             self.face_names.clear();
+            self.face_planes.clear();
             self.evaluated_features.clear();
             self.volume = None;
             self.inspection = None;
@@ -611,6 +674,52 @@ mod implementation {
         fn extrusion_preview(&self, cx: &App) -> Option<crate::ui::extrude_gizmo::ExtrudeGizmo> {
             if self.panel != Some(Panel::Extrude) {
                 return None;
+            }
+            if let Some(face) = self.extrusion_face {
+                let frame = crate::sketch::workplane::Workplane::from(self.face_planes.get(&face)?);
+                let curves: Vec<Vec<[f64; 2]>> = self
+                    .body_edges
+                    .iter()
+                    .filter(|e| e.faces.contains(&face))
+                    .map(|e| {
+                        e.points
+                            .iter()
+                            .map(|p| frame.local(nalgebra::Point3::new(p.x, p.y, p.z)))
+                            .collect()
+                    })
+                    .collect();
+                let points: Vec<_> = curves.iter().flatten().collect();
+                if points.is_empty() {
+                    return None;
+                }
+                let center = [
+                    points.iter().map(|p| p[0]).sum::<f64>() / points.len() as f64,
+                    points.iter().map(|p| p[1]).sum::<f64>() / points.len() as f64,
+                ];
+                let mut d = self.design.clone();
+                let id = d.parameter(
+                    "face_preview_depth",
+                    crate::parameters::expression::dimension_input(
+                        &self.depth.read(cx).content,
+                        false,
+                    ),
+                );
+                let depth = crate::parameters::expression::evaluate(&d).ok()?[&id]
+                    * if matches!(
+                        self.extrude_operation,
+                        ExtrudeOperation::Cut | ExtrudeOperation::CutNewBody
+                    ) {
+                        -1.
+                    } else {
+                        1.
+                    };
+                return Some(crate::ui::extrude_gizmo::ExtrudeGizmo {
+                    camera: self.camera.clone(),
+                    frame,
+                    curves,
+                    center,
+                    depth,
+                });
             }
             let d = self.display_design();
             let regions = crate::sketch::regions::regions(
@@ -660,7 +769,7 @@ mod implementation {
             let depth = *crate::parameters::expression::evaluate(&values)
                 .ok()?
                 .get(&id)?;
-            if depth <= 0. {
+            if depth.abs() <= 1e-7 {
                 return None;
             }
             let sign = if matches!(
@@ -680,82 +789,80 @@ mod implementation {
             })
         }
         fn open_extrude(&mut self, cx: &mut Context<Self>) {
-            self.editing_feature = self
-                .design
-                .solid_features()
-                .iter()
-                .find(|f| Some(f.sketch) == self.design.current_sketch_id())
-                .map(|f| f.id);
-            if let Some(feature) = self
-                .design
-                .solid_features()
-                .iter()
-                .find(|f| Some(f.id) == self.editing_feature)
-            {
-                self.extrude_operation = feature.operation;
-                self.extrude_target = feature.target;
-                if let Some(p) = self
-                    .design
-                    .parameters
-                    .iter()
-                    .find(|p| p.id == feature.depth)
-                {
-                    let text = p.expression.clone();
-                    self.depth = cx.new(|cx| TextInput::new(&text, cx));
-                }
+            self.extrusion_face = (self.selected != 0
+                && self.face_planes.contains_key(&self.selected))
+            .then_some(self.selected);
+            self.editing_feature = None;
+            if let Some(id) = self.design.current_sketch_id() {
+                self.hidden_sketches.remove(&id);
+            }
+            self.extrude_operation = if self.extrusion_face.is_some() {
+                ExtrudeOperation::Join
+            } else if matches!(
+                self.design.active_plane,
+                SketchPlane::Face { .. } | SketchPlane::NamedFace { .. }
+            ) {
+                ExtrudeOperation::Cut
             } else {
-                self.extrude_operation =
-                    if matches!(self.design.active_plane, SketchPlane::Face { .. }) {
-                        ExtrudeOperation::Cut
-                    } else {
-                        ExtrudeOperation::NewBody
-                    };
-                self.extrude_target = match self.design.active_plane {
-                    SketchPlane::Face { support, .. } => Some(support),
-                    _ => self.design.latest_body_feature(),
-                };
-                self.depth = cx.new(|cx| TextInput::new("5 mm", cx));
-            }
+                ExtrudeOperation::NewBody
+            };
+            self.extrude_target = match self.design.active_plane {
+                SketchPlane::Face { support, .. } | SketchPlane::NamedFace { support, .. } => {
+                    Some(support)
+                }
+                _ => self.design.latest_body_feature(),
+            };
+            self.depth = cx.new(|cx| TextInput::new("5 mm", cx));
+            self.tool = Tool::Select;
+            self.construction_cursor = None;
+            self.before_construction = false;
             self.panel = Some(Panel::Extrude);
-            let frame = self.active_frame();
-            if self.camera.outward().dot(&frame.normal).abs() > 0.95 {
-                self.camera
-                    .set_direction(frame.normal + frame.x * 0.65 - frame.y * 0.65, frame.y);
-                self.changed_camera();
+            self.align_sketch_pending = false;
+            let frame = self
+                .extrusion_face
+                .and_then(|face| self.face_planes.get(&face))
+                .map(crate::sketch::workplane::Workplane::from)
+                .unwrap_or_else(|| self.active_frame());
+            self.camera
+                .set_direction(frame.x - frame.y + frame.normal * 0.65, frame.normal);
+            if let Some(preview) = self.extrusion_preview(cx) {
+                self.camera.target =
+                    nalgebra::Point3::from(preview.frame.world(preview.center).coords * 25.);
             }
+            self.changed_camera();
         }
         fn create_sketch(&mut self, cx: &mut Context<Self>) {
             let plane = if self.selected != 0 {
-                let anchors: Vec<_> = self
-                    .face_anchors
-                    .iter()
-                    .filter(|a| a.face == self.selected)
-                    .collect();
-                if anchors.len() != 1 || anchors[0].ambiguous {
-                    self.error = Some(
-                        "Select an unambiguous planar extrusion cap to create a sketch".into(),
-                    );
+                let Some(reference) = self.face_names.get(&self.selected).cloned() else {
+                    self.error = Some("Select a face with an unambiguous reference".into());
+                    self.choosing_sketch_face = true;
+                    cx.notify();
+                    return;
+                };
+                if !self.face_planes.contains_key(&self.selected) {
+                    self.error = Some("Select a flat face to create a sketch".into());
+                    self.choosing_sketch_face = true;
                     cx.notify();
                     return;
                 }
-                let a = anchors[0];
-                SketchPlane::Face {
-                    support: self.evaluated_features[a.support as usize],
-                    producer: self.evaluated_features[a.producer as usize],
-                    role: if a.role == 1 {
-                        CapRole::Start
-                    } else {
-                        CapRole::End
-                    },
+                let Some((support, part)) = self.body_faces.get(&self.selected).copied() else {
+                    return;
+                };
+                if part != 0 {
+                    self.error = Some("Select a face on the main body".into());
+                    cx.notify();
+                    return;
                 }
+                SketchPlane::NamedFace { support, reference }
             } else {
                 SketchPlane::Xy
             };
             let mut candidate = self.design.clone();
-            if candidate.current_sketch_id().is_none()
+            if (candidate.current_sketch_id().is_none() && candidate.create_features.is_empty())
                 || (candidate.points.is_empty()
                     && candidate.extrusion.is_none()
-                    && candidate.features.is_empty())
+                    && candidate.features.is_empty()
+                    && candidate.create_features.is_empty())
             {
                 candidate.ensure_sketch();
                 candidate.active_plane = plane;
@@ -771,6 +878,9 @@ mod implementation {
             }
             self.checkpoint();
             self.design = candidate;
+            if let Some(id) = self.design.current_sketch_id() {
+                self.hidden_sketches.remove(&id);
+            }
             self.solved.clear();
             self.selection.clear();
             self.editing_feature = None;
@@ -778,39 +888,82 @@ mod implementation {
             self.panel = None;
             self.status = match self.design.active_plane {
                 SketchPlane::Xy => "Sketch on XY plane".into(),
-                SketchPlane::Face { .. } => "Sketch on selected face".into(),
+                SketchPlane::Face { .. } | SketchPlane::NamedFace { .. } => {
+                    "Sketch on selected face".into()
+                }
             };
         }
-        fn extrude(&mut self, cx: &mut Context<Self>) {
+        fn extrusion_candidate(&self, cx: &App) -> Result<Design, String> {
             let mut candidate = self.design.clone();
+            if let Some(face) = self.extrusion_face {
+                let reference = self
+                    .face_names
+                    .get(&face)
+                    .ok_or("Select a uniquely named planar face")?
+                    .clone();
+                let target = self.body_faces.get(&face).ok_or("Select a body face")?.0;
+                let depth = candidate.parameter(
+                    &format!("face_depth_{}", candidate.solid_edits.len() + 1),
+                    crate::parameters::expression::dimension_input(
+                        &self.depth.read(cx).content,
+                        false,
+                    ),
+                );
+                let value = crate::parameters::expression::evaluate(&candidate)?[&depth];
+                if self.extrude_operation == ExtrudeOperation::CutNewBody {
+                    return Err("Choose Join, Cut or New body for a face extrusion".into());
+                }
+                let sign = if self.extrude_operation == ExtrudeOperation::Cut {
+                    -1.
+                } else {
+                    1.
+                };
+                if sign < 0. {
+                    let p = candidate
+                        .parameters
+                        .iter_mut()
+                        .find(|p| p.id == depth)
+                        .unwrap();
+                    p.expression = format!("-({})", p.expression);
+                }
+                candidate.solid_edits.push(crate::model::modify::SolidEdit {
+                    id: Uuid::new_v4(),
+                    kind: ModifyKind::PressPull,
+                    target,
+                    tool: None,
+                    face,
+                    edge_points: vec![],
+                    face_reference: Some(reference),
+                    tool_reference: None,
+                    values: [value * sign, 0., 0., 0.],
+                    parameters: [Some(depth), None, None, None],
+                    copy: self.extrude_operation == ExtrudeOperation::NewBody,
+                    mode: 0,
+                });
+                candidate.sync_construction();
+                candidate.validate()?;
+                return Ok(candidate);
+            }
             let sketch = candidate.ensure_sketch();
             let input = match candidate.sketch_input(sketch) {
                 Ok(d) => d,
                 Err(e) => {
-                    self.error = Some(e);
-                    cx.notify();
-                    return;
+                    return Err(e);
                 }
             };
             let parameters = match crate::parameters::expression::evaluate(&candidate) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.error = Some(e);
-                    cx.notify();
-                    return;
+                    return Err(e);
                 }
             };
             let solution = match crate::solver::nonlinear::solve(&input, &parameters) {
                 Ok(s) if s.conflicts.is_empty() => s,
                 Ok(_) => {
-                    self.error = Some("Resolve sketch conflicts before extruding".into());
-                    cx.notify();
-                    return;
+                    return Err("Resolve sketch conflicts before extruding".into());
                 }
                 Err(e) => {
-                    self.error = Some(e);
-                    cx.notify();
-                    return;
+                    return Err(e);
                 }
             };
             let existing = candidate
@@ -845,9 +998,7 @@ mod implementation {
             let region = match region {
                 Ok(r) => r,
                 Err(e) => {
-                    self.error = Some(e);
-                    cx.notify();
-                    return;
+                    return Err(e);
                 }
             };
             let expression =
@@ -881,9 +1032,7 @@ mod implementation {
                 .is_some_and(|e| candidate.extrusion.as_ref().is_some_and(|b| b.id == e.id))
             {
                 if self.extrude_operation != ExtrudeOperation::NewBody {
-                    self.error = Some("The first extrusion creates a new body".into());
-                    cx.notify();
-                    return;
+                    return Err("The first extrusion creates a new body".into());
                 }
                 let e = candidate.extrusion.as_mut().unwrap();
                 e.depth = depth;
@@ -922,23 +1071,74 @@ mod implementation {
                 .validate()
                 .and_then(|_| crate::parameters::expression::evaluate(&candidate).map(|_| ()))
             {
-                self.error = Some(e);
-                cx.notify();
+                return Err(e);
+            }
+            Ok(candidate)
+        }
+        fn extrude(&mut self, cx: &mut Context<Self>) {
+            let candidate = self
+                .extrusion_preview_candidate
+                .clone()
+                .filter(|_| self.extrusion_preview_key == self.current_extrusion_preview_key(cx))
+                .map(Ok)
+                .unwrap_or_else(|| self.extrusion_candidate(cx));
+            match candidate {
+                Ok(candidate) => self.validate_candidate(candidate, cx),
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
+                }
+            }
+        }
+        fn current_extrusion_preview_key(&self, cx: &App) -> String {
+            format!(
+                "{}:{}",
+                crate::evaluation::cache::key(&self.design).unwrap_or_default(),
+                self.candidate_context(cx)
+            )
+        }
+        fn update_extrusion_preview(&mut self, cx: &mut Context<Self>) {
+            if self.pending_candidate.is_some() {
                 return;
             }
-            self.checkpoint();
-            self.design = candidate;
-            self.inputs.retain(|(id, _)| *id != depth);
-            self.sketch = false;
-            self.mode = Mode::Solid;
-            self.panel = None;
-            self.construction_cursor = None;
-            self.before_construction = false;
-            self.anchor = None;
-            self.tool = Tool::Select;
-            self.editing_feature = None;
-            self.rebuild(cx);
-            self.fit();
+            if !matches!(
+                self.panel,
+                Some(Panel::Extrude | Panel::Create | Panel::SolidModify)
+            ) {
+                if !self.extrusion_preview_key.is_empty() {
+                    self.extrusion_preview_key.clear();
+                    self.extrusion_preview_revision = None;
+                    self.extrusion_preview_candidate = None;
+                    self.extrusion_preview_error = None;
+                    self.gpu.clear_preview();
+                    self.rebuild(cx);
+                }
+                return;
+            }
+            let key = self.current_extrusion_preview_key(cx);
+            if key == self.extrusion_preview_key {
+                return;
+            }
+            self.extrusion_preview_key = key;
+            self.extrusion_preview_candidate = None;
+            self.extrusion_preview_revision = None;
+            match match self.panel {
+                Some(Panel::Create) => self.create_candidate(cx),
+                Some(Panel::SolidModify) => self.solid_modify_candidate(cx),
+                _ => self.extrusion_candidate(cx),
+            } {
+                Ok(candidate) => {
+                    self.revision = self.revision.wrapping_add(1);
+                    self.extrusion_preview_revision = Some(self.revision);
+                    self.extrusion_preview_error = None;
+                    self.extrusion_preview_candidate = Some(candidate.clone());
+                    self.worker.submit(self.revision, candidate);
+                }
+                Err(e) => {
+                    self.worker.cancel();
+                    self.extrusion_preview_error = Some(e);
+                }
+            }
         }
         fn forget_recovery(&mut self, index: usize) {
             if let Some(manager) = &mut self.recovery {
@@ -1085,6 +1285,7 @@ mod implementation {
             self.world_sketches.clear();
             self.body_faces.clear();
             self.face_names.clear();
+            self.face_planes.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.active_document = index;
@@ -1109,6 +1310,7 @@ mod implementation {
             self.world_sketches.clear();
             self.body_faces.clear();
             self.face_names.clear();
+            self.face_planes.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.forget_recovery(index);
@@ -1156,6 +1358,7 @@ mod implementation {
             self.world_sketches.clear();
             self.body_faces.clear();
             self.face_names.clear();
+            self.face_planes.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
             self.documents
@@ -1403,6 +1606,8 @@ mod implementation {
                     self.undo.clear();
                     self.redo.clear();
                     self.design = d;
+                    self.hidden_sketches
+                        .extend(self.design.solid_features().iter().map(|f| f.sketch));
                     self.saved_path = if imported { None } else { Some(path) };
                     self.saved_fingerprint = if imported {
                         crate::document::dirty::fingerprint(&Design::default())
@@ -1485,9 +1690,19 @@ mod implementation {
             self.gpu.set_mesh(&[], &[]);
         }
         fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+            if self.sketch && mode == Mode::Solid {
+                if let Some(id) = self.design.current_sketch_id() {
+                    if self.design.solid_features().iter().any(|f| f.sketch == id) {
+                        self.hidden_sketches.insert(id);
+                    }
+                }
+            }
             self.mode = mode;
             self.sketch = mode == Mode::Sketch;
             if self.sketch {
+                if let Some(id) = self.design.current_sketch_id() {
+                    self.hidden_sketches.remove(&id);
+                }
                 self.align_sketch_pending = true;
                 self.align_to_sketch();
                 self.align_sketch_pending = true;
@@ -1506,6 +1721,10 @@ mod implementation {
             }
         }
         fn feature(&mut self, feature: Feature, window: &mut Window, cx: &mut Context<Self>) {
+            if self.sketch_drag.is_some() {
+                self.finish_sketch_drag(true, cx);
+            }
+            self.pending_constraint = None;
             self.error = None;
             self.menu = None;
             window.focus(&self.focus);
@@ -1655,7 +1874,11 @@ mod implementation {
                     self.panel = Some(Panel::Transform);
                     self.tool = Tool::Select;
                 }
-                Action::Fillet => self.panel = Some(Panel::Fillet),
+                Action::Fillet => {
+                    self.panel = Some(Panel::Fillet);
+                    self.tool = Tool::Select;
+                    self.dimension = cx.new(|cx| TextInput::new("1 mm", cx));
+                }
                 Action::Construction => {
                     let mut d = self.display_design();
                     crate::sketch::edit::toggle_construction(&mut d, &self.selection);
@@ -1963,10 +2186,10 @@ mod implementation {
                     let result =
                         crate::parameters::expression::evaluate(&preview).and_then(|values| {
                             let depth = values[&id];
-                            if depth.is_finite() && depth > 1e-7 && depth <= 1000. {
+                            if depth.is_finite() && depth.abs() > 1e-7 && depth.abs() <= 1000. {
                                 Ok(())
                             } else {
-                                Err("Enter a positive depth within the modeling limits".into())
+                                Err("Enter a nonzero depth within the modeling limits".into())
                             }
                         });
                     if let Err(error) = result {
@@ -2972,20 +3195,45 @@ mod implementation {
                         );
                     }
                     content = content.child(operations);
+                    content =
+                        content.child(div().text_size(px(11.)).text_color(rgb(t::MUTED)).child(
+                            self.extrusion_preview_error.clone().unwrap_or_else(|| {
+                                if self.extrusion_preview_revision.is_some() {
+                                    "Updating preview…".into()
+                                } else {
+                                    "Live extrusion preview · negative depth reverses direction"
+                                        .into()
+                                }
+                            }),
+                        ));
                     if self.extrude_operation != ExtrudeOperation::NewBody {
                         content =
                             content.child(div().text_color(rgb(t::MUTED)).child("Target body"));
                         let features = self.design.solid_features();
-                        for f in &features {
-                            if Some(f.id) == self.editing_feature
+                        let current = self
+                            .design
+                            .bodies_before(self.editing_feature.unwrap_or(Uuid::nil()));
+                        let targets: Vec<_> = features
+                            .iter()
+                            .map(|f| (f.id, f.name.clone()))
+                            .chain(
+                                self.design
+                                    .create_features
+                                    .iter()
+                                    .map(|f| (f.id, f.name.clone())),
+                            )
+                            .filter(|(id, _)| current.contains(id))
+                            .collect();
+                        for (target_id, target_name) in &targets {
+                            if Some(*target_id) == self.editing_feature
                                 || features.iter().any(|other| {
-                                    other.target == Some(f.id)
+                                    other.target == Some(*target_id)
                                         && Some(other.id) != self.editing_feature
                                 })
                             {
                                 continue;
                             }
-                            let id = f.id;
+                            let id = *target_id;
                             content = content.child(
                                 div()
                                     .id(SharedString::from(format!("target-{id}")))
@@ -2997,7 +3245,7 @@ mod implementation {
                                     } else {
                                         t::PANEL
                                     }))
-                                    .child(f.name.clone())
+                                    .child(target_name.clone())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.extrude_target = Some(id);
                                         cx.notify();
@@ -3025,9 +3273,9 @@ mod implementation {
                                 self.extrude_operation,
                                 ExtrudeOperation::Cut | ExtrudeOperation::CutNewBody
                             ) {
-                                "Cut inward from sketch plane"
+                                "Positive depth cuts inward; negative depth reverses direction"
                             } else {
-                                "Extrude outward from sketch plane"
+                                "Positive depth extrudes outward; negative depth reverses direction"
                             },
                         ));
                 }
@@ -3077,11 +3325,11 @@ mod implementation {
                             .child(self.transform_rows.clone());
                     }
                     if action == Action::Mirror {
-                        content = content.child("Select objects, then Shift-click the mirror line");
+                        content = content.child("Select objects, then Ctrl-click the mirror line");
                     }
                     if matches!(action, Action::Scale | Action::CircularPattern) {
                         content = content.child(
-                            "Shift-click a point last to set the center. Default: sketch origin.",
+                            "Ctrl-click a point last to set the center. Default: sketch origin.",
                         );
                     }
                     if matches!(action, Action::Move | Action::Scale) {
@@ -3212,7 +3460,7 @@ mod implementation {
                         .child(
                             div()
                                 .text_color(rgb(t::MUTED))
-                                .child("Shift-click to measure between two selections"),
+                                .child("Ctrl-click to measure between two selections"),
                         );
                 }
                 Panel::Offset => {
@@ -3267,27 +3515,48 @@ mod implementation {
                         );
                     }
                     content = content.child(div().text_color(rgb(t::MUTED)).child("Visual style"));
-                    for (id, image, label) in [
-                        ("style-shaded", "attributes", "Shaded"),
-                        ("style-edges", "line", "Shaded with edges"),
-                        ("style-wire", "line_rectangle", "Wireframe"),
-                        ("style-hidden", "invisible", "Hidden edges"),
+                    use crate::render::passes::ViewStyle;
+                    for (id, image, label, style) in [
+                        ("style-shaded", "attributes", "Shaded", ViewStyle::Shaded),
+                        (
+                            "style-edges",
+                            "line",
+                            "Shaded with edges",
+                            ViewStyle::ShadedEdges,
+                        ),
+                        (
+                            "style-hidden",
+                            "invisible",
+                            "Shaded with hidden edges",
+                            ViewStyle::ShadedHiddenEdges,
+                        ),
+                        (
+                            "style-wire",
+                            "line_rectangle",
+                            "Wireframe",
+                            ViewStyle::Wireframe,
+                        ),
+                        (
+                            "style-visible",
+                            "line",
+                            "Visible edges only",
+                            ViewStyle::VisibleEdges,
+                        ),
                     ] {
-                        let available = id == "style-shaded";
                         content = content.child(
                             div()
                                 .flex()
                                 .gap_2()
                                 .items_center()
-                                .child(button(id, image, label, available, available).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        if !available {
-                                            this.error =
-                                                Some(format!("{label} is not implemented"));
-                                        }
-                                        cx.notify();
-                                    }),
-                                ))
+                                .child(
+                                    button(id, image, label, self.view_style == style, true)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.view_style = style;
+                                            this.gpu.set_style(style);
+                                            this.changed_camera();
+                                            cx.notify();
+                                        })),
+                                )
                                 .child(label),
                         );
                     }
@@ -3578,9 +3847,36 @@ mod implementation {
                     button(
                         SharedString::from(format!("feature-{id}")),
                         match feature.kind {
-                            ConstructionKind::Sketch => "line_rectangle",
-                            ConstructionKind::Extrude { .. } => "up",
-                            ConstructionKind::Create | ConstructionKind::Modify => "up",
+                            ConstructionKind::Sketch => "Sketcher_NewSketch",
+                            ConstructionKind::Extrude { .. } => "PartDesign_Pad",
+                            ConstructionKind::Create => self
+                                .design
+                                .create_features
+                                .iter()
+                                .find(|f| f.id == id)
+                                .and_then(|f| {
+                                    toolbar::groups(Mode::Solid)
+                                        .into_iter()
+                                        .flat_map(|group| group.features.iter())
+                                        .find(|tool| {
+                                            tool.action == Some(Action::SolidCreate(f.kind))
+                                        })
+                                })
+                                .map_or("PartDesign_Pad", |tool| tool.icon),
+                            ConstructionKind::Modify => self
+                                .design
+                                .solid_edits
+                                .iter()
+                                .find(|f| f.id == id)
+                                .and_then(|f| {
+                                    toolbar::groups(Mode::Solid)
+                                        .into_iter()
+                                        .flat_map(|group| group.features.iter())
+                                        .find(|tool| {
+                                            tool.action == Some(Action::SolidModify(f.kind))
+                                        })
+                                })
+                                .map_or("PartDesign_Fillet", |tool| tool.icon),
                         },
                         &format!("{} · Edit feature", feature.name),
                         self.construction_cursor == Some(id),
@@ -3991,7 +4287,8 @@ mod implementation {
             if let Some((a, b, _)) = self.marquee {
                 preview = vec![a, [b[0], a[1]], b, [a[0], b[1]], a];
             }
-            if !preview.is_empty()
+            if self.marquee.is_none()
+                && !preview.is_empty()
                 && let Some(p) = self.hover
             {
                 preview.push(p)
@@ -4099,10 +4396,11 @@ mod implementation {
                     ),
                 active: self.mode != Mode::Drawing,
                 visible: !self.hidden.contains("sketches")
-                    && !self
-                        .design
-                        .current_sketch_id()
-                        .is_some_and(|id| self.hidden_sketches.contains(&id)),
+                    && (self.sketch
+                        || !self
+                            .design
+                            .current_sketch_id()
+                            .is_some_and(|id| self.hidden_sketches.contains(&id))),
                 grid: false,
                 axes: false,
                 coords,
@@ -4202,6 +4500,8 @@ mod implementation {
                         )
                 }))
                 .children(self.extrusion_preview(cx).map(|preview| preview.element()))
+                .child(self.topology_overlay())
+                .children(self.parameter_handles(cx))
                 .children(constraint_markers)
                 .children(self.center_of_mass_marker())
                 .when(self.mode == Mode::Drawing, |el| {
@@ -4265,7 +4565,7 @@ mod implementation {
                                     f64::from(event.position.x - bounds.origin.x),
                                     f64::from(event.position.y - bounds.origin.y),
                                 ];
-                                if (cursor[0] - handle[0]).hypot(cursor[1] - handle[1]) < 15. {
+                                if (cursor[0] - handle[0]).hypot(cursor[1] - handle[1]) < 24. {
                                     this.extrude_drag = Some((
                                         event.position,
                                         preview.depth,
@@ -4276,14 +4576,29 @@ mod implementation {
                                 }
                             }
                         }
-                        if this.sketch {
+                        if this.panel == Some(Panel::Extrude) {
+                            if !this.pick_sketch_geometry(
+                                event.position,
+                                event.modifiers.control || event.modifiers.platform,
+                                cx,
+                            ) {
+                                this.pick(event.position);
+                            }
+                        } else if this.sketch {
                             this.sketch_click(
                                 event.position,
-                                event.modifiers.shift,
+                                event.modifiers.control || event.modifiers.platform,
                                 event.modifiers.control || event.modifiers.platform,
                                 cx,
                             );
-                        } else {
+                        } else if !this.pick_sketch_geometry(
+                            event.position,
+                            event.modifiers.control || event.modifiers.platform,
+                            cx,
+                        ) && !this.pick_topology(
+                            event.position,
+                            event.modifiers.control || event.modifiers.platform,
+                        ) {
                             this.pick(event.position);
                         }
                         cx.notify();
@@ -4303,6 +4618,27 @@ mod implementation {
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Some((input, start, initial, unit, integer)) =
+                        this.parameter_drag.clone()
+                    {
+                        if event.pressed_button != Some(MouseButton::Left) {
+                            this.parameter_drag = None;
+                        } else {
+                            use crate::model::solid_create::Unit;
+                            let delta = f64::from(event.position.x - start.x);
+                            let text = match unit {
+                                Unit::Length => format!("{:.3} mm", initial * 1000. + delta * 0.1),
+                                Unit::Angle => format!("{:.2} deg", initial.to_degrees() + delta),
+                                Unit::Number if integer => {
+                                    format!("{:.0}", (initial + delta * 0.1).round())
+                                }
+                                Unit::Number => format!("{:.3}", initial + delta * 0.01),
+                            };
+                            input.update(cx, |input, cx| input.set_content(text, cx));
+                            cx.notify();
+                            return;
+                        }
+                    }
                     if let Some((start, initial, axis)) = this.extrude_drag {
                         if event.pressed_button != Some(MouseButton::Left) {
                             this.extrude_drag = None;
@@ -4315,7 +4651,14 @@ mod implementation {
                             if length > 1e-8 {
                                 let signed = initial
                                     + (delta[0] * axis[0] + delta[1] * axis[1]) / length * 0.001;
-                                let depth = (signed * initial.signum()).max(0.0001);
+                                let depth = signed
+                                    * if this.extrude_operation == ExtrudeOperation::Cut
+                                        || this.extrude_operation == ExtrudeOperation::CutNewBody
+                                    {
+                                        -1.
+                                    } else {
+                                        1.
+                                    };
                                 this.depth.update(cx, |input, cx| {
                                     input.set_content(format!("{:.3} mm", depth * 1000.), cx)
                                 });
@@ -4351,39 +4694,8 @@ mod implementation {
                         {
                             let delta = [at[0] - drag.start[0], at[1] - drag.start[1]];
                             if delta[0].hypot(delta[1]) * this.scale > 2. {
-                                let mut candidate = drag.before.clone();
-                                for p in &mut candidate.points {
-                                    if drag.points.contains(&p.id) {
-                                        p.xy[0] += delta[0];
-                                        p.xy[1] += delta[1];
-                                    }
-                                }
-                                if let Ok(parameters) =
-                                    crate::parameters::expression::evaluate(&candidate)
-                                    && let Ok(solution) = crate::solver::nonlinear::solve_drag(
-                                        &candidate,
-                                        &parameters,
-                                        &candidate
-                                            .points
-                                            .iter()
-                                            .filter(|p| drag.points.contains(&p.id))
-                                            .map(|p| (p.id, p.xy))
-                                            .collect::<Vec<_>>(),
-                                    )
-                                    && solution.conflicts.is_empty()
-                                {
-                                    for (p, xy) in candidate.points.iter_mut().zip(&solution.points)
-                                    {
-                                        p.xy = *xy
-                                    }
-                                    this.design = candidate;
-                                    this.solved = solution.points;
-                                    this.point_dof = solution.point_dof;
-                                    if !this.sketch_drag.as_ref().unwrap().moved {
-                                        this.revision = this.revision.wrapping_add(1);
-                                    }
-                                    this.sketch_drag.as_mut().unwrap().moved = true;
-                                }
+                                this.drag_target = Some(at);
+                                this.poll_drag_solve(cx);
                             }
                         }
                         cx.notify();
@@ -4415,6 +4727,7 @@ mod implementation {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
                         this.extrude_drag = None;
+                        this.parameter_drag = None;
                         this.finish_sketch_drag(false, cx);
                     }),
                 )
@@ -4422,6 +4735,7 @@ mod implementation {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
                         this.extrude_drag = None;
+                        this.parameter_drag = None;
                         this.finish_sketch_drag(false, cx);
                     }),
                 )
@@ -4545,6 +4859,7 @@ mod implementation {
     }
     impl Render for WorkspaceView {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.poll_drag_solve(cx);
             if self
                 .menu_leave_deadline
                 .is_some_and(|deadline| std::time::Instant::now() >= deadline)
@@ -4637,11 +4952,41 @@ mod implementation {
             }) {
                 self.rebuild(cx);
             }
+            self.update_extrusion_preview(cx);
             let evaluated = self
                 .worker
                 .poll()
                 .filter(|result| result.revision == self.revision);
             let evaluated = evaluated.and_then(|result| {
+                if self.extrusion_preview_revision == Some(result.revision)
+                    && self.pending_candidate.is_none()
+                {
+                    self.extrusion_preview_revision = None;
+                    match result.mesh {
+                        Ok(Some(mesh)) => {
+                            let vertices: Vec<_> = mesh
+                                .vertices
+                                .iter()
+                                .map(|v| DemoVertex {
+                                    position: [
+                                        (v.x * 25.) as f32,
+                                        (v.y * 25.) as f32,
+                                        (v.z * 25.) as f32,
+                                    ],
+                                    normal: [v.nx as f32, v.ny as f32, v.nz as f32],
+                                    face: v.face,
+                                    color: [0.72, 0.49, 0.12],
+                                })
+                                .collect();
+                            self.gpu.set_preview(&vertices, &mesh.indices);
+                            self.extrusion_preview_error = None;
+                        }
+                        Err(e) => self.extrusion_preview_error = Some(e),
+                        _ => {}
+                    }
+                    cx.notify();
+                    return None;
+                }
                 if let Some(pending) = self.pending_candidate.take() {
                     let success = result.solution.is_ok() && result.mesh.is_ok();
                     let context = self.candidate_context(cx);
@@ -4649,6 +4994,26 @@ mod implementation {
                         pending.finish(result.revision, success, &self.design, &context)
                     {
                         self.checkpoint();
+                        if self.panel == Some(Panel::Extrude) {
+                            if let Some(sketch) = candidate.current_sketch_id() {
+                                self.hidden_sketches.insert(sketch);
+                            }
+                            self.sketch = false;
+                            self.mode = Mode::Solid;
+                            self.anchor = None;
+                            self.tool = Tool::Select;
+                            self.editing_feature = None;
+                            self.fit_pending = true;
+                            self.gpu.clear_preview();
+                            self.extrusion_preview_key.clear();
+                            self.extrusion_preview_candidate = None;
+                            self.extrusion_preview_revision = None;
+                        }
+                        self.gpu.clear_preview();
+                        self.extrusion_preview_key.clear();
+                        self.extrusion_preview_candidate = None;
+                        self.extrusion_preview_revision = None;
+                        self.extrusion_face = None;
                         self.design = candidate;
                         // Evaluation used this revision while the document was still
                         // unchanged, so its cached dirty flag must be invalidated.
@@ -4768,6 +5133,40 @@ mod implementation {
                                         .map_or(0, |(face, _)| *face);
                                 }
                             }
+                            self.face_planes = mesh
+                                .planar_faces
+                                .into_iter()
+                                .map(|f| (f.face, f.frame))
+                                .collect();
+                            self.body_edges = mesh.edges;
+                            self.body_vertices = mesh.corners;
+                            self.selected_edges.clear();
+                            self.selected_vertices.clear();
+                            if let Some(edit) = self
+                                .solid_editor
+                                .editing
+                                .and_then(|id| self.design.solid_edits.iter().find(|e| e.id == id))
+                            {
+                                for point in &edit.edge_points {
+                                    if let Some(i) = self.body_edges.iter().position(|edge| {
+                                        edge.points.iter().any(|p| {
+                                            (p.x - point[0]).powi(2)
+                                                + (p.y - point[1]).powi(2)
+                                                + (p.z - point[2]).powi(2)
+                                                < 1e-14
+                                        }) || (edge.points.len() == 2 && {
+                                            let a = &edge.points[0];
+                                            let b = &edge.points[1];
+                                            ((a.x + b.x) / 2. - point[0]).powi(2)
+                                                + ((a.y + b.y) / 2. - point[1]).powi(2)
+                                                + ((a.z + b.z) / 2. - point[2]).powi(2)
+                                                < 1e-14
+                                        })
+                                    }) {
+                                        self.selected_edges.push(i);
+                                    }
+                                }
+                            }
                             self.face_anchors = mesh.anchors;
                             self.volume = Some(mesh.volume);
                             self.inspection = Some(mesh.inspection);
@@ -4796,6 +5195,7 @@ mod implementation {
                             self.mesh = None;
                             self.body_faces.clear();
                             self.face_names.clear();
+                            self.face_planes.clear();
                             self.face_anchors.clear();
                             self.refresh_mesh();
                         }
@@ -4827,7 +5227,29 @@ mod implementation {
                 .draw(&self.camera, self.selected, self.pending_pick.take())
             {
                 Ok(Some(pick)) if pick.revision == self.view_revision => {
+                    self.selected_edges.clear();
+                    self.selected_vertices.clear();
                     self.selected = pick.face;
+                    if self.panel == Some(Panel::Extrude) && pick.face != 0 {
+                        self.extrusion_face = Some(pick.face);
+                        if let Some(frame) = self.face_planes.get(&pick.face) {
+                            let frame = crate::sketch::workplane::Workplane::from(frame);
+                            self.camera.set_direction(
+                                frame.x - frame.y + frame.normal * 0.65,
+                                frame.normal,
+                            );
+                            if let Some(preview) = self.extrusion_preview(cx) {
+                                self.camera.target = nalgebra::Point3::from(
+                                    preview.frame.world(preview.center).coords * 25.,
+                                );
+                            }
+                            self.changed_camera();
+                            self.extrude_operation = ExtrudeOperation::Join;
+                            self.extrude_target = self.selected_body();
+                        } else {
+                            self.error = Some("Select a planar face or a sketch region".into());
+                        }
+                    }
                     if self.panel == Some(Panel::SolidModify) {
                         self.solid_editor.reference = self.face_names.get(&pick.face).cloned();
                     }
