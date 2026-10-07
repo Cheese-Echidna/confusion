@@ -33,9 +33,9 @@ releases their cached results.
 
 Failures do not overwrite the last successful final mesh. Successful intermediate
 results may remain cached after a later feature fails or a request is superseded.
-Revision checks continue to prevent stale results from reaching the UI. Cancellation
-still cannot interrupt an individual OCCT operation; native cancellation is separate
-follow-up work.
+Revision checks continue to prevent stale results from reaching the UI. The worker
+now also uses [cooperative native cancellation](native-cancellation.md) to interrupt
+obsolete requests at checkpoints and inside supported OCCT operations.
 
 ## Validation and measurement
 

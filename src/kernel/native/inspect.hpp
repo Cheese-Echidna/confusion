@@ -10,6 +10,7 @@
 #include <limits>
 namespace confusion {
 static Inspection inspect_shape(const TopoDS_Shape &shape) {
+  check_cancelled();
   Inspection result{};
   result.valid = BRepCheck_Analyzer(shape).IsValid();
   for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) ++result.solids;
@@ -23,6 +24,7 @@ static Inspection inspect_shape(const TopoDS_Shape &shape) {
   result.cz = center.Z() * 0.001;
   uint32_t id = 0;
   for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+    check_cancelled();
     const auto face = TopoDS::Face(it.Current());
     FaceInspection entry{};
     entry.face = ++id;
@@ -67,10 +69,11 @@ static void inspect_interference(const std::vector<TopoDS_Shape> &bodies, Inspec
   std::vector<Bnd_Box> bounds(bodies.size());
   for (size_t i = 0; i < bodies.size(); ++i) BRepBndLib::Add(bodies[i], bounds[i]);
   for (size_t i = 0; i < bodies.size(); ++i) for (size_t j = i + 1; j < bodies.size(); ++j) {
+    check_cancelled();
     if (bounds[i].IsOut(bounds[j])) continue;
     try {
-      BRepAlgoAPI_Common common(bodies[i], bodies[j]);
-      common.Build();
+      BRepAlgoAPI_Common common; boolean_inputs(common,bodies[i], bodies[j]);
+      build_cancellable(common);
       if (!common.IsDone() || common.HasErrors()) {
         result.error = "Some body intersections could not be evaluated";
         continue;

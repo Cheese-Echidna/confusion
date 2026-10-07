@@ -42,6 +42,7 @@ fn main() {
             "src/kernel/native/solid_create.inc",
             "src/kernel/native/modify.inc",
             "src/kernel/native/inspect.hpp",
+            "src/kernel/native/cancellation.hpp",
         ] {
             println!("cargo:rerun-if-changed={file}");
         }

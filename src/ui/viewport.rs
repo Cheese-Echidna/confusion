@@ -139,6 +139,7 @@ mod implementation {
         error: Option<String>,
         design: Design,
         worker: Worker,
+        pending_candidate: Option<crate::runtime::candidate::CandidateEdit>,
         revision: u64,
         solved: Vec<[f64; 2]>,
         sketch: bool,
@@ -282,6 +283,7 @@ mod implementation {
                 design: Design::default(),
                 worker: Worker::new(),
                 revision: 0,
+                pending_candidate: None,
                 solved: vec![],
                 sketch: false,
                 tool: Tool::Select,
@@ -479,7 +481,67 @@ mod implementation {
             }
             self.changed_camera();
         }
+        fn cancel_candidate(&mut self) {
+            if self.pending_candidate.take().is_some() {
+                self.worker.cancel();
+            }
+        }
+        fn candidate_context(&self, cx: &App) -> String {
+            match self.panel {
+                Some(Panel::Create) => self.create_editor.as_ref().map_or_else(String::new, |e| {
+                    format!(
+                        "create:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                        e.kind,
+                        e.editing,
+                        e.sketch,
+                        e.second_sketch,
+                        e.target,
+                        e.second_target,
+                        self.selection,
+                        e.fields
+                            .iter()
+                            .map(|f| f.read(cx).content.to_string())
+                            .collect::<Vec<_>>()
+                    )
+                }),
+                Some(Panel::SolidModify) => {
+                    let e = &self.solid_editor;
+                    format!(
+                        "modify:{:?}:{:?}:{:?}:{:?}:{}:{}:{}:{:?}",
+                        e.kind,
+                        e.editing,
+                        e.target,
+                        e.tool,
+                        e.copy,
+                        e.mode,
+                        self.selected,
+                        e.fields
+                            .iter()
+                            .map(|f| f.read(cx).content.to_string())
+                            .collect::<Vec<_>>()
+                    )
+                }
+                _ => String::new(),
+            }
+        }
+        fn validate_candidate(&mut self, candidate: Design, cx: &mut Context<Self>) {
+            if self.pending_candidate.is_some() {
+                return;
+            }
+            self.revision = self.revision.wrapping_add(1);
+            self.pending_candidate = Some(crate::runtime::candidate::CandidateEdit::new(
+                self.revision,
+                &self.design,
+                self.candidate_context(cx),
+                candidate.clone(),
+            ));
+            self.error = None;
+            self.status = "Validating…".into();
+            self.worker.submit(self.revision, candidate);
+            cx.notify();
+        }
         fn checkpoint(&mut self) {
+            self.cancel_candidate();
             self.undo.push(self.design.clone());
             if self.undo.len() > 100 {
                 self.undo.remove(0);
@@ -487,6 +549,7 @@ mod implementation {
             self.redo.clear();
         }
         fn rebuild(&mut self, cx: &mut Context<Self>) {
+            self.cancel_candidate();
             self.sketch_region = None;
             self.revision = self.revision.wrapping_add(1);
             self.changed_camera();
@@ -1498,6 +1561,10 @@ mod implementation {
             self.rebuild(cx);
         }
         fn undo_edit(&mut self, cx: &mut Context<Self>) {
+            if self.pending_candidate.is_some() {
+                self.rebuild(cx);
+                return;
+            }
             if let Some(d) = self.undo.pop() {
                 self.redo.push(self.design.clone());
                 self.design = d;
@@ -1505,6 +1572,10 @@ mod implementation {
             }
         }
         fn redo_edit(&mut self, cx: &mut Context<Self>) {
+            if self.pending_candidate.is_some() {
+                self.rebuild(cx);
+                return;
+            }
             if let Some(d) = self.redo.pop() {
                 self.undo.push(self.design.clone());
                 self.design = d;
@@ -1731,7 +1802,7 @@ mod implementation {
                 Some(Panel::Fillet) => self.apply_offset_or_fillet(true, cx),
                 _ => return,
             }
-            if self.error.is_none() {
+            if self.error.is_none() && self.pending_candidate.is_none() {
                 self.panel = None;
                 window.focus(&self.focus);
             }
@@ -4379,9 +4450,52 @@ mod implementation {
                     }
                 }
             }
-            if let Some(result) = self.worker.poll()
-                && result.revision == self.revision
-            {
+            if self.pending_candidate.as_ref().is_some_and(|pending| {
+                !pending.is_current(&self.design, &self.candidate_context(cx))
+            }) {
+                self.rebuild(cx);
+            }
+            let evaluated = self
+                .worker
+                .poll()
+                .filter(|result| result.revision == self.revision);
+            let evaluated = evaluated.and_then(|result| {
+                if let Some(pending) = self.pending_candidate.take() {
+                    let success = result.solution.is_ok() && result.mesh.is_ok();
+                    let context = self.candidate_context(cx);
+                    if let Some(candidate) =
+                        pending.finish(result.revision, success, &self.design, &context)
+                    {
+                        self.checkpoint();
+                        self.design = candidate;
+                        // Evaluation used this revision while the document was still
+                        // unchanged, so its cached dirty flag must be invalidated.
+                        self.dirty_cache.set((u64::MAX, false));
+                        if self.panel == Some(Panel::Create) {
+                            self.fit_pending = true;
+                        }
+                        self.create_editor = None;
+                        self.panel = None;
+                        self.construction_cursor = None;
+                        self.before_construction = false;
+                        self.selected = 0;
+                        self.changed_camera();
+                        self.inputs = self
+                            .design
+                            .parameters
+                            .iter()
+                            .map(|p| (p.id, cx.new(|cx| TextInput::new(&p.expression, cx))))
+                            .collect();
+                        window.focus(&self.focus);
+                    } else {
+                        self.status = "Validation failed".into();
+                        self.error = result.solution.err().or_else(|| result.mesh.err());
+                        return None;
+                    }
+                }
+                Some(result)
+            });
+            if let Some(result) = evaluated {
                 if let Err(error) = &result.solution {
                     self.status = "Evaluation failed".into();
                     self.error = Some(error.clone());

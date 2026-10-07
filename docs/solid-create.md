@@ -46,3 +46,7 @@ Create bodies or extrusions. Their outputs do not expose semantic extrusion cap
 attachments for face-supported sketches. Complex freeform paths, curved embossing,
 surface thickening, and general boundary-cell selection remain extensions beyond
 the operations described above.
+
+Apply validates geometry in the background and shows **Validating…**. Success
+commits one undo step; failure keeps the editor and current design intact. See
+[background Solid Apply](async-solid-apply.md) for cancellation and validation.

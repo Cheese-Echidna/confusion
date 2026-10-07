@@ -13,3 +13,5 @@ pub mod scheduler;
 pub mod telemetry;
 
 pub mod worker;
+
+pub mod candidate;

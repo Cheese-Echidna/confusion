@@ -15,6 +15,9 @@ impl WorkspaceView {
         editing: Option<Uuid>,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_candidate.is_some() {
+            self.rebuild(cx);
+        }
         self.error = None;
         let existing = editing
             .and_then(|id| self.design.create_features.iter().find(|f| f.id == id))
@@ -83,6 +86,9 @@ impl WorkspaceView {
         cx.notify();
     }
     fn apply_create(&mut self, cx: &mut Context<Self>) {
+        if self.pending_candidate.is_some() {
+            return;
+        }
         use crate::model::solid_create::{CreateFeature, CreateKind, Unit};
         let Some(editor) = &self.create_editor else {
             return;
@@ -180,23 +186,7 @@ impl WorkspaceView {
             candidate.create_features.push(feature);
         }
         candidate.sync_construction();
-        match crate::evaluation::solid::evaluate(&candidate, || false) {
-            Ok(_) => {
-                self.checkpoint();
-                self.design = candidate;
-                self.inputs.clear();
-                self.panel = None;
-                self.create_editor = None;
-                self.construction_cursor = None;
-                self.before_construction = false;
-                self.fit_pending = true;
-                self.rebuild(cx);
-            }
-            Err(e) => {
-                self.error = Some(e);
-                cx.notify();
-            }
-        }
+        self.validate_candidate(candidate, cx);
     }
     fn create_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::model::solid_create::CreateKind;
@@ -326,8 +316,16 @@ impl WorkspaceView {
         }
         content
             .child(
-                text_button("confirm-create", "Apply", "Create solid feature · Enter")
-                    .on_click(cx.listener(|this, _, window, cx| this.confirm_editor(window, cx))),
+                text_button(
+                    "confirm-create",
+                    if self.pending_candidate.is_some() {
+                        "Validating…"
+                    } else {
+                        "Apply"
+                    },
+                    "Create solid feature · Enter",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.confirm_editor(window, cx))),
             )
             .into_any_element()
     }

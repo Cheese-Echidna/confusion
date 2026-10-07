@@ -10,9 +10,9 @@ static TopoDS_Shape translated(const TopoDS_Shape &s, double x, double y, double
 }
 static TopoDS_Shape boolean_shape(const TopoDS_Shape &a, const TopoDS_Shape &b, int kind) {
   TopoDS_Shape result;
-  if (kind == 0) { BRepAlgoAPI_Fuse op(a,b); op.Build(); if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Join failed"); result = op.Shape(); }
-  else if (kind == 1) { BRepAlgoAPI_Cut op(a,b); op.Build(); if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Cut failed"); result = op.Shape(); }
-  else { BRepAlgoAPI_Common op(a,b); op.Build(); if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Cell intersection failed"); result = op.Shape(); }
+  if (kind == 0) { BRepAlgoAPI_Fuse op; boolean_inputs(op,a,b); build_cancellable(op); if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Join failed"); result = op.Shape(); }
+  else if (kind == 1) { BRepAlgoAPI_Cut op; boolean_inputs(op,a,b); build_cancellable(op); if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Cut failed"); result = op.Shape(); }
+  else { BRepAlgoAPI_Common op; boolean_inputs(op,a,b); build_cancellable(op); if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Cell intersection failed"); result = op.Shape(); }
   check_solid(result);
   return result;
 }
@@ -46,6 +46,7 @@ static TopoDS_Shape gear(double module, int teeth, double height, double bore) {
   BRepBuilderAPI_MakePolygon polygon;
   auto add = [&](double r, double a) { polygon.Add(gp_Pnt(r*std::cos(a),r*std::sin(a),0)); };
   for (int tooth=0; tooth<teeth; ++tooth) {
+    check_cancelled();
     double a = tau*tooth/teeth;
     const double flank_root = std::max(root,base);
     add(root,a-half-at_pitch);
@@ -64,6 +65,7 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
                            std::vector<Output> &outputs, std::vector<bool> &consumed,
                            ModelCacheImpl *cache, rust::Slice<const rust::String> keys, size_t offset) {
   for (size_t index=0;index<creates.size();++index) {
+    check_cancelled();
     try {
       const auto &s = creates[index];
       auto *entry = cache ? &cache->features[offset + index] : nullptr;
@@ -109,7 +111,7 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
         BRepOffsetAPI_ThruSections loft(true,false,1e-5);
         loft.AddWire(outer_wire(profile(s.edge_start,s.edge_count)));
         loft.AddWire(TopoDS::Wire(translated(outer_wire(profile(s.second_start,s.second_count)),0,0,mm(0))));
-        loft.Build(); if (!loft.IsDone()) throw std::runtime_error("Loft failed"); result=loft.Shape(); break;
+        build_cancellable(loft); if (!loft.IsDone()) throw std::runtime_error("Loft failed"); result=loft.Shape(); break;
       }
       case 3: case 4: { // positioned rectangular reinforcement
         auto tool=BRepPrimAPI_MakeBox(gp_Pnt(mm(3),mm(4),mm(5)),mm(0),mm(1),mm(2)).Shape();
@@ -139,12 +141,15 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
         // The original stays a separate live body; this output owns only copies.
         if (s.kind==14) {
           int cols=static_cast<int>(value(0)), rows=static_cast<int>(value(1));
-          for (int y=0;y<rows;++y) for (int x=0;x<cols;++x) if (x||y) builder.Add(compound,translated(source,x*mm(2),y*mm(3),0));
+          for (int y=0;y<rows;++y) for (int x=0;x<cols;++x) {
+            check_cancelled();
+            if (x||y) builder.Add(compound,translated(source,x*mm(2),y*mm(3),0));
+          }
         } else if (s.kind==15) {
           int count=static_cast<int>(value(0)); bool full=std::abs(value(1)-tau)<1e-8;
-          for(int i=1;i<count;++i) { gp_Trsf t; t.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,0,1)),value(1)*i/(full?count:count-1)); builder.Add(compound,moved(source,t)); }
+          for(int i=1;i<count;++i) { check_cancelled(); gp_Trsf t; t.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,0,1)),value(1)*i/(full?count:count-1)); builder.Add(compound,moved(source,t)); }
         } else if (s.kind==16) {
-          int count=static_cast<int>(value(0)); for(int i=1;i<count;++i) { double f=static_cast<double>(i)/(count-1); builder.Add(compound,translated(source,mm(1)*f,mm(2)*f,mm(3)*f)); }
+          int count=static_cast<int>(value(0)); for(int i=1;i<count;++i) { check_cancelled(); double f=static_cast<double>(i)/(count-1); builder.Add(compound,translated(source,mm(1)*f,mm(2)*f,mm(3)*f)); }
         } else {
           int plane=static_cast<int>(value(0)); gp_Pnt p(plane==0?mm(1):0,plane==1?mm(1):0,plane==2?mm(1):0);
           gp_Trsf t; t.SetMirror(gp_Ax2(p,gp_Dir(plane==0,plane==1,plane==2))); builder.Add(compound,moved(source,t));
@@ -153,7 +158,9 @@ static void append_creates(rust::Slice<const ProfileEdge> edges,
       }
       case 18: {
         BRepOffsetAPI_MakeOffsetShape offset;
-        offset.PerformByJoin(body(s.target),mm(0),1e-4,BRepOffset_Skin,false,false,GeomAbs_Arc,true);
+        run_cancellable([&](const Message_ProgressRange &range) {
+          offset.PerformByJoin(body(s.target),mm(0),1e-4,BRepOffset_Skin,false,false,GeomAbs_Arc,true,range);
+        });
         if (!offset.IsDone()) throw std::runtime_error("Body offset failed");
         result=boolean_shape(offset.Shape(),body(s.target),1); consume=true; break;
       }

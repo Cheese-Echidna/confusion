@@ -40,3 +40,8 @@ public:
 std::unique_ptr<ModelCache> new_model_cache();
 Mesh evaluate_cached_model(ModelCache &, rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>, rust::Slice<const CreateStep>, rust::Slice<const rust::String>);
 }
+
+namespace confusion {
+struct EvaluationCancellation;
+Mesh evaluate_cancellable_model(ModelCache &, rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>, rust::Slice<const CreateStep>, rust::Slice<const rust::String>, const EvaluationCancellation &);
+}

@@ -24,16 +24,16 @@ static gp_Pln edit_plane(const TopoDS_Face& face) {
 }
 static TopoDS_Shape boolean_edit(const TopoDS_Shape& target, const TopoDS_Shape& tool, uint32_t mode) {
   if (mode == 0) {
-    BRepAlgoAPI_Fuse op(target, tool); op.Build();
+    BRepAlgoAPI_Fuse op; boolean_inputs(op,target, tool); build_cancellable(op);
     if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Join failed");
     return op.Shape();
   }
   if (mode == 1) {
-    BRepAlgoAPI_Cut op(target, tool); op.Build();
+    BRepAlgoAPI_Cut op; boolean_inputs(op,target, tool); build_cancellable(op);
     if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Cut failed");
     return op.Shape();
   }
-  BRepAlgoAPI_Common op(target, tool); op.Build();
+  BRepAlgoAPI_Common op; boolean_inputs(op,target, tool); build_cancellable(op);
   if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Intersection failed");
   return op.Shape();
 }
@@ -55,13 +55,13 @@ static TopoDS_Shape heal_face(const TopoDS_Shape& shape, const TopoDS_Face& face
     }
   }
   GProp_GProps before, after;BRepGProp::VolumeProperties(shape,before);
-  feature.Build();
+  build_cancellable(feature);
   if (feature.IsDone() && !feature.HasErrors() && !has_face(feature.Shape(),face) && BRepCheck_Analyzer(feature.Shape()).IsValid()) {
     BRepGProp::VolumeProperties(feature.Shape(),after);
     if (std::abs(before.Mass()-after.Mass())>1e-6 && after.Mass()>1e-6) return feature.Shape();
   }
   // Blends can be healed by removing just the selected face.
-  BRepAlgoAPI_Defeaturing single;single.SetShape(shape);single.AddFaceToRemove(face);single.Build();
+  BRepAlgoAPI_Defeaturing single;single.SetShape(shape);single.AddFaceToRemove(face);build_cancellable(single);
   if(single.IsDone() && !single.HasErrors() && !has_face(single.Shape(),face)) {
     BRepGProp::VolumeProperties(single.Shape(),after);
     if(std::abs(before.Mass()-after.Mass())>1e-6) return single.Shape();
@@ -72,6 +72,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
                         rust::Slice<const ModifyStep> edits, ModelCacheImpl *cache,
                         rust::Slice<const rust::String> keys, size_t offset) {
   for (size_t n = 0; n < edits.size(); ++n) {
+    check_cancelled();
     const auto& e = edits[n];
     auto *entry = cache ? &cache->edits[n] : nullptr;
     if (entry && entry->key == std::string(keys[offset + n])) {
@@ -115,18 +116,20 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         if (e.kind == 1) {
           BRepFilletAPI_MakeFillet op(shape);
           for (int i = 1; i <= edges.Extent(); ++i) op.Add(e.a * 1000., TopoDS::Edge(edges(i)));
-          op.Build(); if (!op.IsDone()) throw std::runtime_error("Fillet failed; reduce the radius"); result = op.Shape();
+          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Fillet failed; reduce the radius"); result = op.Shape();
         } else {
           BRepFilletAPI_MakeChamfer op(shape);
           for (int i = 1; i <= edges.Extent(); ++i) op.Add(e.a * 1000., TopoDS::Edge(edges(i)));
-          op.Build(); if (!op.IsDone()) throw std::runtime_error("Chamfer failed; reduce the distance"); result = op.Shape();
+          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Chamfer failed; reduce the distance"); result = op.Shape();
         }
         break;
       }
       case 3: {
         TopTools_ListOfShape openings; openings.Append(face);
         BRepOffsetAPI_MakeThickSolid op;
-        op.MakeThickSolidByJoin(shape, openings, -e.a * 1000., 1e-5, BRepOffset_Skin, false, false, GeomAbs_Intersection);
+        run_cancellable([&](const Message_ProgressRange &range) {
+          op.MakeThickSolidByJoin(shape, openings, -e.a * 1000., 1e-5, BRepOffset_Skin, false, false, GeomAbs_Intersection, false, range);
+        });
         if (!op.IsDone()) throw std::runtime_error("Shell failed; reduce the wall thickness");
         result = op.Shape(); break;
       }
@@ -134,7 +137,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         BRepOffsetAPI_DraftAngle op(shape);
         op.Add(face, gp_Dir(0,0,1), e.a, gp_Pln(gp_Pnt(0,0,e.b*1000.),gp_Dir(0,0,1)));
         if (!op.AddDone()) throw std::runtime_error("Cannot draft this face along Z");
-        op.Build(); if (!op.IsDone()) throw std::runtime_error("Draft failed"); result = op.Shape(); break;
+        build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Draft failed"); result = op.Shape(); break;
       }
       case 5: case 12: {
         gp_Trsf tr;
@@ -169,18 +172,18 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         TopoDS_Face cutter = BRepBuilderAPI_MakeFace(plane).Face();
         if (e.kind == 9) {
           TopTools_ListOfShape args, tools; args.Append(shape); tools.Append(cutter);
-          BRepAlgoAPI_Splitter op; op.SetArguments(args);op.SetTools(tools);op.Build();
+          BRepAlgoAPI_Splitter op; op.SetArguments(args);op.SetTools(tools);build_cancellable(op);
           if (!op.IsDone() || op.HasErrors()) throw std::runtime_error("Body split failed");
           result = op.Shape();
           unsigned solids=0; for(TopExp_Explorer it(result,TopAbs_SOLID);it.More();it.Next()) ++solids;
           if (solids < 2) throw std::runtime_error("Cutting plane does not split the body");
         } else {
-          BRepAlgoAPI_Section section(face,cutter,false); section.ComputePCurveOn1(true);section.Build();
+          BRepAlgoAPI_Section section(face,cutter,false); section.ComputePCurveOn1(true);build_cancellable(section);
           if (!section.IsDone()) throw std::runtime_error("Face section failed");
           BRepFeat_SplitShape op(shape); unsigned count=0;
           for(TopExp_Explorer it(section.Shape(),TopAbs_EDGE);it.More();it.Next()) { op.Add(TopoDS::Edge(it.Current()),face);++count; }
           if (!count) throw std::runtime_error("Cutting plane does not cross the selected face");
-          op.Build(); if (!op.IsDone()) throw std::runtime_error("Face split failed"); result=op.Shape();
+          build_cancellable(op); if (!op.IsDone()) throw std::runtime_error("Face split failed"); result=op.Shape();
         }
         break;
       }
@@ -204,7 +207,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         BRepFeat_SplitShape op(shape);
         for(int i=1;i<=wires->Length();++i)op.Add(TopoDS::Wire(wires->Value(i)),face);
         if(!wires->Length())throw std::runtime_error("Tool outline does not cross the selected face");
-        op.Build();if(!op.IsDone())throw std::runtime_error("Silhouette split failed");result=op.Shape();break;
+        build_cancellable(op);if(!op.IsDone())throw std::runtime_error("Silhouette split failed");result=op.Shape();break;
       }
       case 13: {
         if (tool.IsNull()) throw std::runtime_error("Choose an alignment body");
@@ -220,7 +223,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         if (!face.IsNull()) {
           result=heal_face(shape,face);
         } else {
-          ShapeUpgrade_UnifySameDomain op(shape,true,true,true);op.Build();result=op.Shape();
+          ShapeUpgrade_UnifySameDomain op(shape,true,true,true);op.Build();check_cancelled();result=op.Shape();
         }
         break;
       }

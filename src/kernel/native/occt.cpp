@@ -64,6 +64,7 @@
 #include <gp_Vec.hxx>
 #include <stdexcept>
 #include <vector>
+#include "cancellation.hpp"
 #include "inspect.hpp"
 namespace confusion {
 constexpr double tau = 6.2831853071795864769;
@@ -138,6 +139,7 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
                        const std::vector<Output> &outputs = {},
                        const std::vector<bool> &consumed = {},
                        const std::vector<std::pair<size_t, TopoDS_Shape>> &pieces = {}) {
+  check_cancelled();
   if (!BRepCheck_Analyzer(shape).IsValid())
     throw std::runtime_error("Invalid final model");
   GProp_GProps properties;
@@ -148,10 +150,18 @@ static Mesh mesh_shape(const TopoDS_Shape &shape,
   result.inspection = inspect_shape(shape);
   if (!std::isfinite(result.volume) || result.volume < 0)
     throw std::runtime_error("Model has no solid volume");
-  BRepMesh_IncrementalMesh mesher(shape, 0.1, false, 0.3, true);
+  IMeshTools_Parameters parameters;
+  parameters.Deflection = 0.1;
+  parameters.Relative = false;
+  parameters.Angle = 0.3;
+  parameters.InParallel = true;
+  Handle(Message_ProgressIndicator) progress = new CancellationProgress(active_cancellation);
+  BRepMesh_IncrementalMesh mesher(shape, parameters, progress->Start());
+  check_cancelled();
   if (!mesher.IsDone())
     throw std::runtime_error("Could not triangulate solid");
   for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+    check_cancelled();
     const auto face = TopoDS::Face(it.Current());
     TopLoc_Location location;
     auto triangles = BRep_Tool::Triangulation(face, location);
@@ -339,11 +349,13 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
       cache->features.resize(steps.size() + creates.size());
       cache->edits.resize(edits.size());
     }
+    check_cancelled();
     std::vector<Output> outputs;
     std::vector<bool> consumed;
     std::vector<std::pair<size_t, TopoDS_Shape>> pieces;
     std::vector<gp_Trsf> frames;
     for (size_t index = 0; index < steps.size(); ++index) {
+      check_cancelled();
       const auto &step = steps[index];
       FeatureEntry *entry = cache ? &cache->features[index] : nullptr;
       if (entry && entry->key == std::string(keys[index])) {
@@ -410,22 +422,22 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
           GProp_GProps before, after;
           BRepGProp::VolumeProperties(outputs[step.target].shape, before);
           if (step.operation == 1) {
-            BRepAlgoAPI_Fuse op(outputs[step.target].shape, output.shape);
-            op.Build();
+            BRepAlgoAPI_Fuse op; boolean_inputs(op,outputs[step.target].shape, output.shape);
+            build_cancellable(op);
             if (!op.IsDone() || op.HasErrors())
               throw std::runtime_error("Join failed");
             output.shape = op.Shape();
             output.caps = follow_caps(op, caps, output.shape);
           } else {
             if (step.operation == 3) {
-              BRepAlgoAPI_Common common(outputs[step.target].shape, output.shape);
-              common.Build();
+              BRepAlgoAPI_Common common; boolean_inputs(common,outputs[step.target].shape, output.shape);
+              build_cancellable(common);
               if (!common.IsDone() || common.HasErrors()) throw std::runtime_error("Could not create the cut body");
               check_solid(common.Shape());
               pieces.emplace_back(index, common.Shape());
             }
-            BRepAlgoAPI_Cut op(outputs[step.target].shape, output.shape);
-            op.Build();
+            BRepAlgoAPI_Cut op; boolean_inputs(op,outputs[step.target].shape, output.shape);
+            build_cancellable(op);
             if (!op.IsDone() || op.HasErrors())
               throw std::runtime_error("Cut failed");
             output.shape = op.Shape();
@@ -459,6 +471,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
     }
     append_creates(edges, creates, outputs, consumed, cache, keys, steps.size());
     for (size_t i = 0; i < planes.size(); ++i) {
+      check_cancelled();
       ModelStep plane{};
       plane.support = planes[i].support;
       plane.producer = planes[i].producer;
@@ -478,6 +491,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
       if (!consumed[i])
         builder.Add(combined, outputs[i].shape);
     for (const auto &piece : pieces) builder.Add(combined, piece.second);
+    check_cancelled();
     auto result = mesh_shape(combined, outputs, consumed, pieces);
     std::vector<TopoDS_Shape> inspection_bodies;
     for (size_t i = 0; i < outputs.size(); ++i)
@@ -493,6 +507,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
       result.planes.push_back(PlaneFrame{o.X()*0.001,o.Y()*0.001,o.Z()*0.001,
         x.X(),x.Y(),x.Z(),y.X(),y.Y(),y.Z(),n.X(),n.Y(),n.Z()});
     }
+    check_cancelled();
     return result;
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(e.GetMessageString());
@@ -505,6 +520,12 @@ Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges, rust::Slice<c
 Mesh evaluate_cached_model(ModelCache &cache, rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
     rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits, rust::Slice<const CreateStep> creates,
     rust::Slice<const rust::String> keys) {
+  return evaluate_impl(cache.impl.get(), keys, edges, steps, planes, edits, creates);
+}
+Mesh evaluate_cancellable_model(ModelCache &cache, rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
+    rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits, rust::Slice<const CreateStep> creates,
+    rust::Slice<const rust::String> keys, const EvaluationCancellation &token) {
+  CancellationScope scope(token);
   return evaluate_impl(cache.impl.get(), keys, edges, steps, planes, edits, creates);
 }
 Mesh evaluate_create_model(rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,

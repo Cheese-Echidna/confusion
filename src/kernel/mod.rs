@@ -15,3 +15,6 @@ pub mod queries;
 pub mod session;
 pub mod tessellation;
 pub mod validation;
+
+#[cfg(feature = "kernel")]
+pub mod cancellation;

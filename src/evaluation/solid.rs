@@ -29,6 +29,7 @@ mod implementation {
             cancelled,
             &mut crate::evaluation::cache::EvaluationCache::default(),
             false,
+            None,
         )
     }
     pub fn evaluate_cached(
@@ -36,13 +37,22 @@ mod implementation {
         cancelled: impl Fn() -> bool,
         cache: &mut crate::evaluation::cache::EvaluationCache,
     ) -> Result<EvaluatedModel, String> {
-        evaluate_internal(design, cancelled, cache, true)
+        evaluate_internal(design, cancelled, cache, true, None)
+    }
+    /// Cancellable native evaluation; token callbacks are safe on OCCT worker threads.
+    pub fn evaluate_cancellable(
+        design: &Design,
+        token: &crate::kernel::cancellation::EvaluationCancellation,
+        cache: &mut crate::evaluation::cache::EvaluationCache,
+    ) -> Result<EvaluatedModel, String> {
+        evaluate_internal(design, || token.is_cancelled(), cache, true, Some(token))
     }
     fn evaluate_internal(
         design: &Design,
         cancelled: impl Fn() -> bool,
         cache: &mut crate::evaluation::cache::EvaluationCache,
         reuse: bool,
+        token: Option<&crate::kernel::cancellation::EvaluationCancellation>,
     ) -> Result<EvaluatedModel, String> {
         design.validate()?;
         let mut design = design.clone();
@@ -299,16 +309,35 @@ mod implementation {
                     cache.reused_features = keys.len();
                     mesh.clone()
                 } else {
-                    let mesh = ffi::evaluate_cached_model(
-                        cache.native.pin_mut(),
-                        &edges,
-                        &steps,
-                        &planes,
-                        &edits,
-                        &creates,
-                        &keys,
-                    )
+                    if cancelled() {
+                        return Err("Evaluation superseded".into());
+                    }
+                    let mesh = if let Some(token) = token {
+                        ffi::evaluate_cancellable_model(
+                            cache.native.pin_mut(),
+                            &edges,
+                            &steps,
+                            &planes,
+                            &edits,
+                            &creates,
+                            &keys,
+                            token,
+                        )
+                    } else {
+                        ffi::evaluate_cached_model(
+                            cache.native.pin_mut(),
+                            &edges,
+                            &steps,
+                            &planes,
+                            &edits,
+                            &creates,
+                            &keys,
+                        )
+                    }
                     .map_err(|e| e.to_string())?;
+                    if cancelled() {
+                        return Err("Evaluation superseded".into());
+                    }
                     cache.reused_features = cache.native.reused_features();
                     cache.mesh = Some((mesh_key, mesh.clone()));
                     mesh

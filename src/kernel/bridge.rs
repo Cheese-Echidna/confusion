@@ -2,6 +2,8 @@
 //! Exports owned Mesh/Vertex through extrude. Coordinates and exact volume are SI;
 //! meshing is derived display data. Native exceptions become Rust Result errors.
 #[cfg(feature = "kernel")]
+use crate::kernel::cancellation::{EvaluationCancellation, evaluation_cancelled};
+#[cfg(feature = "kernel")]
 #[cxx::bridge(namespace = "confusion")]
 pub mod ffi {
     struct ProfileEdge {
@@ -133,6 +135,10 @@ pub mod ffi {
         volume: f64,
         faces: u32,
     }
+    extern "Rust" {
+        type EvaluationCancellation;
+        fn evaluation_cancelled(token: &EvaluationCancellation) -> bool;
+    }
     unsafe extern "C++" {
         include!("src/kernel/native/occt.hpp");
         type ModelCache;
@@ -145,6 +151,16 @@ pub mod ffi {
             edits: &[ModifyStep],
             creates: &[CreateStep],
             keys: &[String],
+        ) -> Result<Mesh>;
+        fn evaluate_cancellable_model(
+            cache: Pin<&mut ModelCache>,
+            edges: &[ProfileEdge],
+            steps: &[ModelStep],
+            planes: &[FaceRequest],
+            edits: &[ModifyStep],
+            creates: &[CreateStep],
+            keys: &[String],
+            token: &EvaluationCancellation,
         ) -> Result<Mesh>;
         fn reused_features(self: &ModelCache) -> usize;
         fn evaluate_model(

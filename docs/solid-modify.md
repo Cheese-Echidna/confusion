@@ -43,3 +43,7 @@ cargo test --test solid_modify
 nix-shell --run 'cargo test --features solver,kernel --test solid_modify'
 nix-shell --run 'cargo check --features desktop'
 ```
+
+Apply validates geometry in the background and shows **Validating…**. Success
+commits one undo step; failure keeps the editor and current design intact. See
+[background Solid Apply](async-solid-apply.md) for cancellation and validation.

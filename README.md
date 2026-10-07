@@ -73,3 +73,9 @@ See [import and export](docs/import-export.md) for printing exports and the limi
 The evaluation worker reuses unchanged sketch solutions and native feature shapes.
 See [incremental regeneration](docs/incremental-regeneration.md) for invalidation
 rules, validation, measurements, and remaining limits.
+
+Background rebuilds support [cooperative native cancellation](docs/native-cancellation.md)
+when a newer edit supersedes an active request.
+
+Solid/Create and Solid/Modify use [background Apply validation](docs/async-solid-apply.md)
+to commit successful candidates without blocking the UI or rebuilding twice.

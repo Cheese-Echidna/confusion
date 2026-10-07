@@ -44,6 +44,9 @@ impl WorkspaceView {
             .collect();
     }
     fn open_solid_modify(&mut self, kind: ModifyKind, cx: &mut Context<Self>) {
+        if self.pending_candidate.is_some() {
+            self.rebuild(cx);
+        }
         self.mode = Mode::Solid;
         self.sketch = false;
         self.construction_cursor = None;
@@ -193,6 +196,9 @@ impl WorkspaceView {
         crate::parameters::expression::evaluate(&d).map(|values| values[&id])
     }
     fn apply_solid_modify(&mut self, cx: &mut Context<Self>) {
+        if self.pending_candidate.is_some() {
+            return;
+        }
         let result = (|| {
             let kind = self.solid_editor.kind;
             let target = self
@@ -284,18 +290,10 @@ impl WorkspaceView {
             }
             candidate.sync_construction();
             candidate.validate()?;
-            // Confirm exact geometry before recording undo or changing the canonical design.
-            crate::evaluation::solid::evaluate(&candidate, || false)?;
             Ok(candidate)
         })();
         match result {
-            Ok(candidate) => {
-                self.checkpoint();
-                self.design = candidate;
-                self.selected = 0;
-                self.inputs.clear();
-                self.rebuild(cx);
-            }
+            Ok(candidate) => self.validate_candidate(candidate, cx),
             Err(error) => self.error = Some(error),
         }
     }
@@ -583,8 +581,16 @@ impl WorkspaceView {
             }
         }
         content.child(
-            text_button("apply-solid-edit", "Apply", "Confirm edit · Enter")
-                .on_click(cx.listener(|this, _, window, cx| this.confirm_editor(window, cx))),
+            text_button(
+                "apply-solid-edit",
+                if self.pending_candidate.is_some() {
+                    "Validating…"
+                } else {
+                    "Apply"
+                },
+                "Confirm edit · Enter",
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.confirm_editor(window, cx))),
         )
     }
 }

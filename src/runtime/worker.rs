@@ -3,11 +3,14 @@
 //! snapshot replaces earlier queued edits; one result slot bounds completed output. The worker owns all native evaluation state.
 #[cfg(all(feature = "solver", feature = "kernel"))]
 mod implementation {
+    use crate::kernel::cancellation::EvaluationCancellation;
     use crate::{
         document::schema::Design, evaluation::solid, kernel::bridge::ffi, solver::nonlinear,
     };
     use std::sync::{Arc, Condvar, Mutex};
     struct Pending {
+        active: Option<(u64, EvaluationCancellation)>,
+        latest_revision: Option<u64>,
         snapshot: Option<(u64, Design)>,
         stop: bool,
     }
@@ -43,6 +46,8 @@ mod implementation {
             let pending = Arc::new((
                 Mutex::new(Pending {
                     snapshot: None,
+                    active: None,
+                    latest_revision: None,
                     stop: false,
                 }),
                 Condvar::new(),
@@ -55,7 +60,7 @@ mod implementation {
                 .spawn(move || {
                     let mut cache = crate::evaluation::cache::EvaluationCache::default();
                     loop {
-                        let (revision, design) = {
+                        let (revision, design, token) = {
                             let (lock, wake) = &*state;
                             let mut p = lock.lock().unwrap();
                             while p.snapshot.is_none() && !p.stop {
@@ -64,21 +69,13 @@ mod implementation {
                             if p.stop {
                                 break;
                             }
-                            p.snapshot.take().unwrap()
+                            let (revision, design) = p.snapshot.take().unwrap();
+                            let token = EvaluationCancellation::default();
+                            p.active = Some((revision, token.clone()));
+                            (revision, design, token)
                         };
                         let evaluated = recover_evaluation(|| {
-                            solid::evaluate_cached(
-                                &design,
-                                || {
-                                    let pending = state.0.lock().unwrap();
-                                    pending.stop
-                                        || pending
-                                            .snapshot
-                                            .as_ref()
-                                            .is_some_and(|(r, _)| *r > revision)
-                                },
-                                &mut cache,
-                            )
+                            solid::evaluate_cancellable(&design, &token, &mut cache)
                         });
                         let (solution, mesh, features, sketch, sketches) = match evaluated {
                             Ok(model) => (
@@ -90,14 +87,16 @@ mod implementation {
                             ),
                             Err(error) => (Err(error.clone()), Err(error), vec![], None, vec![]),
                         };
-                        // Drop results already superseded while a native operation was running.
-                        if state
-                            .0
-                            .lock()
-                            .unwrap()
-                            .snapshot
-                            .as_ref()
-                            .is_some_and(|(r, _)| *r > revision)
+                        // Keep the pending lock through publication so a newer submit
+                        // cannot race between the revision check and the result write.
+                        let mut pending = state.0.lock().unwrap();
+                        pending.active = None;
+                        if pending.stop
+                            || token.is_cancelled()
+                            || pending
+                                .snapshot
+                                .as_ref()
+                                .is_some_and(|(r, _)| *r > revision)
                         {
                             continue;
                         }
@@ -116,8 +115,27 @@ mod implementation {
         }
         pub fn submit(&self, revision: u64, design: Design) {
             let mut p = self.pending.0.lock().unwrap();
+            if p.stop || p.latest_revision.is_some_and(|r| revision <= r) {
+                return;
+            }
+            p.latest_revision = Some(revision);
+            if let Some((_, token)) = &p.active {
+                token.cancel();
+            }
+            // Remove a completed obsolete result immediately; publication uses
+            // the same lock order (pending, results).
+            *self.results.lock().unwrap() = None;
             p.snapshot = Some((revision, design));
             self.pending.1.notify_one();
+        }
+        /// Abandon a candidate without publishing it or replacing canonical intent.
+        pub fn cancel(&self) {
+            let mut pending = self.pending.0.lock().unwrap();
+            if let Some((_, token)) = &pending.active {
+                token.cancel();
+            }
+            pending.snapshot = None;
+            *self.results.lock().unwrap() = None;
         }
         pub fn poll(&self) -> Option<ResultSnapshot> {
             self.results.lock().unwrap().take()
@@ -125,7 +143,11 @@ mod implementation {
     }
     impl Drop for Worker {
         fn drop(&mut self) {
-            self.pending.0.lock().unwrap().stop = true;
+            let mut pending = self.pending.0.lock().unwrap();
+            pending.stop = true;
+            if let Some((_, token)) = &pending.active {
+                token.cancel();
+            }
             self.pending.1.notify_one();
         }
     }
@@ -202,6 +224,107 @@ mod implementation {
             assert_eq!(repaired.revision, 2);
             let mesh = repaired.mesh.unwrap().unwrap();
             assert!((mesh.volume - (0.08 * 0.05 * 0.01 - 0.02 * 0.02 * 0.003)).abs() < 1e-11);
+        }
+        fn design(pockets: usize) -> Design {
+            let mut d = Design::default();
+            d.rectangle([0., 0.], [0.08, 0.05]);
+            let depth = d.parameter("thickness", "10 mm".into());
+            let base = uuid::Uuid::new_v4();
+            d.extrusion = Some(Extrusion {
+                id: base,
+                depth,
+                boundary: vec![],
+            });
+            d.sync_construction();
+            let mut target = base;
+            for n in 0..pockets {
+                let sketch = d
+                    .create_sketch(SketchPlane::Face {
+                        support: target,
+                        producer: base,
+                        role: CapRole::End,
+                    })
+                    .unwrap();
+                let x = 0.004 + (n % 8) as f64 * 0.009;
+                let y = 0.004 + (n / 8) as f64 * 0.012;
+                d.rectangle([x, y], [x + 0.005, y + 0.007]);
+                let boundary = crate::sketch::regions::select(
+                    &d,
+                    &d.points.iter().map(|p| p.xy).collect::<Vec<_>>(),
+                    &[],
+                )
+                .unwrap()
+                .boundary;
+                let depth = d.parameter(&format!("pocket{n}"), "3 mm".into());
+                let id = uuid::Uuid::new_v4();
+                d.features.push(ExtrudeFeature {
+                    id,
+                    name: format!("Pocket {n}"),
+                    sketch,
+                    boundary,
+                    depth,
+                    operation: ExtrudeOperation::Cut,
+                    target: Some(target),
+                });
+                d.sync_construction();
+                target = id;
+            }
+            d
+        }
+        fn wait_for_native(worker: &Worker) -> EvaluationCancellation {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some((_, token)) = &worker.pending.0.lock().unwrap().active
+                    && token.native_polls() > 0
+                {
+                    return token.clone();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Worker did not enter native evaluation"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        #[test]
+        fn newer_revision_cancels_active_native_evaluation_and_publishes_only_latest() {
+            let worker = Worker::new();
+            worker.submit(1, design(24));
+            let obsolete = wait_for_native(&worker);
+            worker.submit(2, design(0));
+            worker.submit(1, design(1)); // stale submissions cannot replace the pending edit
+            assert!(obsolete.is_cancelled());
+            let result = await_result(&worker);
+            assert_eq!(result.revision, 2);
+            assert_eq!(result.features.len(), 1);
+            let mesh = result.mesh.unwrap().unwrap();
+            assert!((mesh.volume - 0.08 * 0.05 * 0.01).abs() < 1e-12);
+            // Older input cannot replace an already completed revision either.
+            worker.submit(1, design(0));
+            assert!(worker.poll().is_none());
+            worker.submit(3, design(1));
+            assert_eq!(await_result(&worker).revision, 3);
+        }
+        #[test]
+        fn cancelling_candidate_discards_it_and_allows_a_new_request() {
+            let worker = Worker::new();
+            worker.submit(1, design(24));
+            let token = wait_for_native(&worker);
+            worker.cancel();
+            assert!(token.is_cancelled());
+            assert!(worker.poll().is_none());
+            worker.submit(2, design(0));
+            let result = await_result(&worker);
+            assert_eq!(result.revision, 2);
+            assert!(result.mesh.unwrap().is_some());
+        }
+        #[test]
+        fn dropping_worker_cancels_active_native_evaluation() {
+            let worker = Worker::new();
+            worker.submit(1, design(24));
+            let token = wait_for_native(&worker);
+            drop(worker);
+            assert!(token.is_cancelled());
         }
         #[test]
         fn evaluator_panic_becomes_an_error_without_unwinding_the_worker_loop() {
