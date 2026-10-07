@@ -11,3 +11,5 @@ pub mod jobs;
 pub mod progress;
 pub mod scheduler;
 pub mod telemetry;
+
+pub mod worker;

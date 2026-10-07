@@ -22,3 +22,10 @@ pub mod theme;
 pub mod toolbar;
 pub mod viewport;
 pub mod workspace;
+
+pub mod text_input;
+
+pub mod assets;
+
+pub mod sketch_canvas;
+pub mod view_cube;

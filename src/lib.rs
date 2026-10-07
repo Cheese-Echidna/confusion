@@ -4,7 +4,8 @@
 //! application composition and GPUI views live in separate upper-layer modules.
 //!
 //! Connections: main.rs will call application::bootstrap after runtime implementation.
-//! All child APIs named in file comments are proposed contracts, not implemented types.
+//! Most child APIs are proposed contracts; the planar sketch/extrusion workflow is
+//! implemented in document, parameters, solver, kernel, runtime, persistence and UI.
 //! See docs/architecture.md for dependency direction and docs/file-map.md for each file.
 //!
 //! Canonical .con state excludes edit history. Domain code uses f64 geometry; GPU

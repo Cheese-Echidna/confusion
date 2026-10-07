@@ -13,9 +13,12 @@ Reference/import meshes and GPU tessellation are supporting data, not extra mode
 Surface geometry is needed inside solid algorithms; a separate surface-design
 workbench is outside the agreed scope.
 
-This repository currently contains a **compilable architecture scaffold**, not an
-implemented CAD application. Child modules name proposed types/traits in their top
-comments; those names are not implemented exports. See [file-map.md](file-map.md)
+This repository contains a **compilable architecture scaffold, GPU viewport and working
+planar sketch → exact extrusion workflow**. The current document schema, length expression
+parser, constraint solver, OCCT bridge, background worker, `.con` persistence and sketch/model
+UI are implemented. Most other modules describe proposed APIs in their top comments.
+See [parametric-workflow.md](parametric-workflow.md) for supported modeling behavior and
+[viewport-proof.md](viewport-proof.md) for compositor integration. See [file-map.md](file-map.md)
 for all source contracts, [libraries.md](libraries.md) for dependencies and
 [feature-parity.md](feature-parity.md) for the completion checklist.
 
@@ -244,8 +247,9 @@ early architectural gate**. Keep GPUI and implement/pin an owned compositor adap
 or a narrowly scoped GPUI fork; verify Linux, macOS and Windows before adopting the
 revision. A GPUI-compatible wgpu fork is an alternative to benchmark, not an assumed
 drop-in replacement. All GPUI-related dependencies must come from one compatible
-revision. The standalone `wgpu` major in the manifest is provisional if a shared
-GPUI backend requires a different version.
+revision. The viewport experiment now pins a GPUI-compatible WGPUI fork and its matching
+wgpu Git revision. It supplies the shared-device surface seam; it does not yet prove
+all platforms or production compositor robustness. See [viewport-proof.md](viewport-proof.md).
 
 ## Local files and settings
 
@@ -332,3 +336,14 @@ The largest remaining engineering risks are robust numerical solving, persistent
 topological naming, fillet/Boolean failure recovery, exact profile extraction,
 cross-platform GPU composition and associative drafting. Each has its own files and
 contracts so failures can be isolated and repaired without redefining the saved model.
+
+## Current implementation boundary
+
+The initial planar intent DTO is consolidated in `document/schema.rs`; parameter evaluation
+and solving consume this immutable DTO. The workspace temporarily composes gestures,
+document transactions, in-memory undo and rendering in `ui/viewport.rs`, with background
+execution isolated in `runtime/worker.rs`. Split these responsibilities along the planned
+contracts as more entity/feature types arrive, and extract common parameter/domain types
+before turning these namespaces into separate crates. The native adapter currently rebuilds
+one prism per evaluation and returns values; retained exact-shape sessions and semantic
+face naming are future requirements for additional features and export.

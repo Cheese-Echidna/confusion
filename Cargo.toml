@@ -4,13 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# The scaffold is headless by default. These features reserve backend dependencies;
-# they do not claim that a desktop application, solver, or kernel is implemented.
+# Headless intent/persistence by default; desktop enables GPU rendering, solver and OCCT.
 default = []
-desktop = ["dep:gpui", "gpu"]
+desktop = ["dep:gpui", "dep:libc", "gpu", "solver", "kernel"]
 gpu = ["dep:wgpu", "dep:bytemuck"]
 solver = ["dep:faer", "dep:rayon"]
-kernel = ["dep:cxx"]
+kernel = ["dep:cxx", "dep:cxx-build"]
 
 [dependencies]
 # See docs/libraries.md for selection rationale and native integrations.
@@ -22,13 +21,31 @@ nalgebra = { version = "0.34", features = ["serde-serialize"] }
 petgraph = "0.8"
 blake3 = "1"
 tracing = "0.1"
+unicode-segmentation = "1"
 
-# GPUI 0.2.2 includes its own platform backend. gpui_platform is not published
-# on crates.io; a future upstream/fork migration must pin all GPUI crates together.
-gpui = { version = "=0.2.2", optional = true }
-wgpu = { version = "29", optional = true }
+# Viewport spike: GPUI-compatible WGPUI provides a shared-device GPU compositor.
+# Both dependencies must use the same wgpu source for Device/Texture type identity.
+gpui = { package = "gpui-ce", git = "https://github.com/nestrilabs/wgpui", rev = "baa3f3b00839ee9567b81450f45a58c3a6c43cb8", optional = true }
+# gpui_util's xattr 0.2.3 still imports ENOATTR, removed in libc 0.2.190.
+# Keep this compatibility constraint until the upstream utility dependency is updated.
+libc = { version = "=0.2.186", optional = true }
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", features = ["metal"], optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 faer = { version = "0.24", optional = true }
 rayon = { version = "1", optional = true }
-# An owned, narrow OCCT bridge; no native build or unsafe code in this scaffold.
+# Owned, value-only OCCT bridge; native include/library paths come from shell.nix.
 cxx = { version = "1", optional = true }
+
+zip = { version = "6", default-features = false, features = ["deflate"] }
+tempfile = "3"
+
+[build-dependencies]
+cxx-build = { version = "1", optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
+png = "0.18"
+
+[[example]]
+name = "viewport_smoke"
+required-features = ["gpu"]

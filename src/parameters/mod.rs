@@ -10,3 +10,5 @@ pub mod configurations;
 pub mod evaluate;
 pub mod expressions;
 pub mod table;
+
+pub mod expression;

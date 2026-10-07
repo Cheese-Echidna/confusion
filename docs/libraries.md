@@ -11,8 +11,8 @@ start, rather than forcing every unused codec/native toolchain into this scaffol
 
 | Library | Purpose and owner | Decision / limitation |
 | --- | --- | --- |
-| [GPUI](https://gpui.rs), `gpui = 0.2.2` | Desktop UI, focus, input, window lifecycle; `ui`, `application`, `platform` | Keep the requested framework. Optional `desktop` feature. Its platform backends are included in this published version. Native texture embedding needs an audited compositor bridge. |
-| [wgpu](https://docs.rs/wgpu/latest/wgpu/), major 29 | Depth-tested 3D, shading, edge passes, picking; `render` | Optional `gpu` feature. Keep behind renderer interfaces; align its version with the eventual shared-device compositor. |
+| [GPUI](https://gpui.rs), pinned GPUI-compatible WGPUI fork | Desktop UI, focus, input, window lifecycle; `ui`, `application`, `platform` | Optional `desktop` feature. The viewport proof uses shared-device surfaces from WGPUI; validate the experimental compositor across platforms before committing to it long term. |
+| [wgpu](https://docs.rs/wgpu/latest/wgpu/), matching pinned WGPUI Git revision (28.0.0) | Depth-tested 3D, shading, edge passes, picking; `render` | Optional `gpu` feature. Keep behind renderer interfaces; source and revision match the compositor so Device/Texture types are shared. |
 | [bytemuck](https://docs.rs/bytemuck/latest/bytemuck/) | Checked POD buffer layouts; `render` | Optional with GPU. GPU structs are derived data, separate from persisted f64 geometry. |
 | [Open CASCADE](https://dev.opencascade.org/doc/overview/html/occt_user_guides__modeling_algos.html) | Exact B-rep curves/solids, Booleans, fillets, shells, offsets, meshing and hidden-line removal; `kernel` | Selected native kernel. Pin a tested native release/build, then expose only required APIs. No native kernel is built or bundled yet. |
 | [CXX](https://cxx.rs) | Owned Rust/C++ OCCT bridge; `kernel/bridge` | Optional `kernel` feature currently brings only CXX. Add `cxx-build`/CMake/native link configuration with the first real bridge, not a fake empty build script. |
@@ -26,8 +26,8 @@ start, rather than forcing every unused codec/native toolchain into this scaffol
 | [thiserror](https://docs.rs/thiserror/latest/thiserror/) | Typed errors at module boundaries | Preserve diagnostic codes and source entity IDs. |
 | [tracing](https://docs.rs/tracing/latest/tracing/) | Job/solver/kernel/render spans and diagnostics | Local logging only. Add a subscriber at application startup when runtime code exists. |
 
-The core features reserve dependencies; they do not yet implement a renderer,
-solver, geometry kernel or GUI. Headless checks should be the default while these
+The desktop/GPU features now implement the viewport proof; solver and kernel
+features still reserve dependencies for future implementations. Headless checks should be the default while these
 contracts are being established. A later desktop package can enable its required
 backends by default once it is an actual application.
 
@@ -112,7 +112,7 @@ Thus `gpui + wgpu` alone is **not** a finished cross-platform integration. Prove
 compositor adapter/fork and pin the full compatible GPUI family. Our
 `render/gpui_bridge` and `platform/gpu_surface` are the explicit implementation sites.
 Keep production presentation on the GPU; do not conceal the gap with per-frame
-CPU image uploads. The chosen bridge also determines whether wgpu major 29 stays.
+CPU image uploads. The chosen bridge also determines whether wgpu matching pinned WGPUI Git revision (28.0.0) stays.
 
 ## Work that libraries do not supply
 
@@ -122,3 +122,13 @@ constraint/DOF feedback, parameter/configuration semantics, component joint work
 associative drawing standards and repair UX. OCCT supplies exact geometric operations;
 faer supplies linear algebra; GPUI and wgpu supply presentation foundations. The
 parity checklist measures the complete workflows across those boundaries.
+
+## Implemented sketch/extrusion path
+
+The `desktop` feature now enables `solver` (faer 0.24 and Rayon) and `kernel` (CXX
+and cxx-build). `shell.nix` supplies OCCT 7.9.3 include/library paths. Root `build.rs`
+compiles the value-only owned extrusion bridge, with native shapes kept in the worker.
+ZIP 6 with deflate and tempfile implement bounded, atomic `.con` containers.
+Unicode segmentation supports GPUI input editing. The reusable input is adapted from
+the pinned WGPUI Apache-2.0 example; its license is retained under `licenses/`.
+See [parametric-workflow.md](parametric-workflow.md) for actual behavior and limits.

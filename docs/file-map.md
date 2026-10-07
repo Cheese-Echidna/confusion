@@ -1,15 +1,15 @@
 # Rust file map
 
-This is a source skeleton, not an implemented modeling application. Every `.rs` file
+This is an architecture scaffold with an implemented GPU viewport and planar sketch → exact extrusion workflow. Every `.rs` file
 starts with its responsibility, proposed public types/traits, connections and an invariant.
-The proposed APIs exist only in comments; module declarations are the implemented structure.
+Most proposed APIs exist only in comments. The implemented domain, solver, native kernel, persistence, worker and UI path is documented in [parametric-workflow.md](parametric-workflow.md); viewport integration is documented in [viewport-proof.md](viewport-proof.md).
 Keep this map in step with implementation splits. Modules are currently one library so
 headless checks can validate wiring; move them into workspace crates when the contracts settle.
 
 | Module | Responsibilities | Leaf files |
 | --- | --- | --- |
 | [foundation](../src/foundation/mod.rs) | Kernel-independent vocabulary used by every domain; never import GPUI, FFI, persistence or application services. | 6 |
-| [parameters](../src/parameters/mod.rs) | Own named values and safe dimensional expression evaluation; depend only on foundation and generic libraries. | 4 |
+| [parameters](../src/parameters/mod.rs) | Own named values and safe dimensional expression evaluation; depend only on foundation and generic libraries. | 5 |
 | [document](../src/document/mod.rs) | Own canonical current design state and atomic mutations; no UI, kernel handles or runtime caches in persistent types. | 7 |
 | [sketch](../src/sketch/mod.rs) | Define sketch intent and topology independently of solver implementation and UI gestures. | 9 |
 | [solver](../src/solver/mod.rs) | Implement a multithreaded geometric constraint solver over immutable problems; never mutate the document directly. | 9 |
@@ -180,3 +180,9 @@ headless checks can validate wiring; move them into workspace crates when the co
 | [drawing/annotations.rs](../src/drawing/annotations.rs) | Define associative dimensions, GD&T, datum symbols, centerlines, weld and surface-finish symbols. | DrawingAnnotation, GdtFrame, DatumReference, AnnotationEvaluator | document/references, drawing/views, parameters/table |
 | [drawing/tables.rs](../src/drawing/tables.rs) | Generate BOM, balloons, hole tables and title blocks. | DrawingTable, Balloon, TitleBlock, DrawingTableEvaluator | assembly/bom, model/feature, drawing/document |
 | [drawing/export.rs](../src/drawing/export.rs) | Export vector PDF/SVG/DXF and plot sheets with embedded fonts and explicit scale. | DrawingExporter trait, DrawingExportOptions, PlotResult | exchange/dxf, exchange/svg, drawing/views |
+
+Implementation additions: `parameters/expression.rs` owns the bounded dimensional parser,
+`runtime/worker.rs` owns revisioned background evaluation, `ui/text_input.rs` owns reusable
+native input fields, and root `build.rs` builds `kernel/native/occt.cpp` through CXX.
+The initial coherent intent DTO is in `document/schema.rs`; parameter evaluation currently
+consumes that DTO. Extract its parameter types before splitting these modules into crates.

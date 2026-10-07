@@ -15,3 +15,5 @@ pub mod passes;
 pub mod picking;
 pub mod renderer;
 pub mod scene;
+
+pub mod grid;
