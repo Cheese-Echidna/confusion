@@ -69,3 +69,7 @@ The desktop enables the numerical solver and native OCCT bridge; neither is
 required for headless document validation or `.con` persistence.
 
 See [import and export](docs/import-export.md) for printing exports and the limited editable Fusion transfer workflow. Direct native Fusion archive decoding is not implemented.
+
+The evaluation worker reuses unchanged sketch solutions and native feature shapes.
+See [incremental regeneration](docs/incremental-regeneration.md) for invalidation
+rules, validation, measurements, and remaining limits.

@@ -26,3 +26,17 @@ Mesh extrude(rust::Slice<const Point2>, double);
 namespace confusion {
 Mesh evaluate_complete_model(rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>, rust::Slice<const CreateStep>);
 }
+
+#include <memory>
+namespace confusion {
+struct ModelCacheImpl;
+class ModelCache {
+public:
+  ModelCache();
+  ~ModelCache();
+  std::unique_ptr<ModelCacheImpl> impl;
+  size_t reused_features() const;
+};
+std::unique_ptr<ModelCache> new_model_cache();
+Mesh evaluate_cached_model(ModelCache &, rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>, rust::Slice<const CreateStep>, rust::Slice<const rust::String>);
+}

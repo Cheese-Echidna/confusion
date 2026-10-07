@@ -1,4 +1,4 @@
-//! Audited value-only CXX boundary: OCCT shapes never escape their worker invocation.
+//! Audited CXX boundary: opaque OCCT caches remain confined to their owning worker.
 //! Exports owned Mesh/Vertex through extrude. Coordinates and exact volume are SI;
 //! meshing is derived display data. Native exceptions become Rust Result errors.
 #[cfg(feature = "kernel")]
@@ -51,6 +51,7 @@ pub mod ffi {
         producer: i32,
         role: u32,
     }
+    #[derive(Clone)]
     struct FaceAnchor {
         face: u32,
         support: u32,
@@ -58,6 +59,7 @@ pub mod ffi {
         role: u32,
         ambiguous: bool,
     }
+    #[derive(Clone)]
     struct PlaneFrame {
         ox: f64,
         oy: f64,
@@ -72,6 +74,7 @@ pub mod ffi {
         ny: f64,
         nz: f64,
     }
+    #[derive(Clone)]
     struct BodyFace {
         face: u32,
         body: u32,
@@ -81,6 +84,7 @@ pub mod ffi {
         x: f64,
         y: f64,
     }
+    #[derive(Clone)]
     struct Vertex {
         x: f64,
         y: f64,
@@ -90,6 +94,7 @@ pub mod ffi {
         nz: f64,
         face: u32,
     }
+    #[derive(Clone)]
     struct FaceInspection {
         face: u32,
         area: f64,
@@ -99,11 +104,13 @@ pub mod ffi {
         max_draft: f64,
         samples: u32,
     }
+    #[derive(Clone)]
     struct Interference {
         first: u32,
         second: u32,
         volume: f64,
     }
+    #[derive(Clone)]
     struct Inspection {
         area: f64,
         cx: f64,
@@ -115,6 +122,7 @@ pub mod ffi {
         interference: Vec<Interference>,
         error: String,
     }
+    #[derive(Clone)]
     struct Mesh {
         inspection: Inspection,
         planes: Vec<PlaneFrame>,
@@ -127,6 +135,18 @@ pub mod ffi {
     }
     unsafe extern "C++" {
         include!("src/kernel/native/occt.hpp");
+        type ModelCache;
+        fn new_model_cache() -> UniquePtr<ModelCache>;
+        fn evaluate_cached_model(
+            cache: Pin<&mut ModelCache>,
+            edges: &[ProfileEdge],
+            steps: &[ModelStep],
+            planes: &[FaceRequest],
+            edits: &[ModifyStep],
+            creates: &[CreateStep],
+            keys: &[String],
+        ) -> Result<Mesh>;
+        fn reused_features(self: &ModelCache) -> usize;
         fn evaluate_model(
             edges: &[ProfileEdge],
             steps: &[ModelStep],

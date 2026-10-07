@@ -53,6 +53,7 @@ mod implementation {
             std::thread::Builder::new()
                 .name("confusion-evaluation".into())
                 .spawn(move || {
+                    let mut cache = crate::evaluation::cache::EvaluationCache::default();
                     loop {
                         let (revision, design) = {
                             let (lock, wake) = &*state;
@@ -66,14 +67,18 @@ mod implementation {
                             p.snapshot.take().unwrap()
                         };
                         let evaluated = recover_evaluation(|| {
-                            solid::evaluate(&design, || {
-                                let pending = state.0.lock().unwrap();
-                                pending.stop
-                                    || pending
-                                        .snapshot
-                                        .as_ref()
-                                        .is_some_and(|(r, _)| *r > revision)
-                            })
+                            solid::evaluate_cached(
+                                &design,
+                                || {
+                                    let pending = state.0.lock().unwrap();
+                                    pending.stop
+                                        || pending
+                                            .snapshot
+                                            .as_ref()
+                                            .is_some_and(|(r, _)| *r > revision)
+                                },
+                                &mut cache,
+                            )
                         });
                         let (solution, mesh, features, sketch, sketches) = match evaluated {
                             Ok(model) => (

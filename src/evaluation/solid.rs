@@ -24,11 +24,36 @@ mod implementation {
         design: &Design,
         cancelled: impl Fn() -> bool,
     ) -> Result<EvaluatedModel, String> {
+        evaluate_internal(
+            design,
+            cancelled,
+            &mut crate::evaluation::cache::EvaluationCache::default(),
+            false,
+        )
+    }
+    pub fn evaluate_cached(
+        design: &Design,
+        cancelled: impl Fn() -> bool,
+        cache: &mut crate::evaluation::cache::EvaluationCache,
+    ) -> Result<EvaluatedModel, String> {
+        evaluate_internal(design, cancelled, cache, true)
+    }
+    fn evaluate_internal(
+        design: &Design,
+        cancelled: impl Fn() -> bool,
+        cache: &mut crate::evaluation::cache::EvaluationCache,
+        reuse: bool,
+    ) -> Result<EvaluatedModel, String> {
         design.validate()?;
         let mut design = design.clone();
         design.sync_construction();
         design.validate()?;
         let parameters = expression::evaluate(&design)?;
+        cache.reused_sketches = 0;
+        cache.reused_features = 0;
+        cache
+            .sketches
+            .retain(|id, _| design.construction.iter().any(|f| f.id == *id));
         let mut solutions = HashMap::new();
         let mut sketches = Vec::new();
         for sketch in design
@@ -40,8 +65,28 @@ mod implementation {
                 return Err("Evaluation superseded".into());
             }
             let input = design.sketch_input(sketch.id)?;
-            let s = nonlinear::solve_cancellable(&input, &parameters, &cancelled)
-                .map_err(|e| format!("{}: {e}", sketch.name))?;
+            let mut semantic_input = input.clone();
+            semantic_input.parameters.clear();
+            let values: Vec<_> = input
+                .constraints
+                .iter()
+                .filter_map(|c| c.kind.parameter())
+                .map(|id| (id, parameters[&id]))
+                .collect();
+            let key = crate::evaluation::cache::key(&(semantic_input, values))?;
+            let s = if let Some((_, solution)) = cache
+                .sketches
+                .get(&sketch.id)
+                .filter(|(stored, _)| *stored == key)
+            {
+                cache.reused_sketches += 1;
+                solution.clone()
+            } else {
+                let solution = nonlinear::solve_cancellable(&input, &parameters, &cancelled)
+                    .map_err(|e| format!("{}: {e}", sketch.name))?;
+                cache.sketches.insert(sketch.id, (key, solution.clone()));
+                solution
+            };
             let mut display = input;
             for (point, xy) in display.points.iter_mut().zip(&s.points) {
                 point.xy = *xy;
@@ -209,6 +254,8 @@ mod implementation {
             });
         }
         let mesh = if steps.is_empty() && creates.is_empty() {
+            cache.mesh = None;
+            cache.native = ffi::new_model_cache();
             None
         } else {
             let edits: Vec<_> = design
@@ -239,10 +286,37 @@ mod implementation {
                     })
                 })
                 .collect::<Result<_, String>>()?;
-            Some(
+            Some(if reuse {
+                let keys = crate::evaluation::invalidation::feature_keys(
+                    &edges, &steps, &creates, &edits,
+                )?;
+                let plane_keys: Vec<_> = planes
+                    .iter()
+                    .map(|p| (p.support, p.producer, p.role))
+                    .collect();
+                let mesh_key = crate::evaluation::cache::key(&(&keys, plane_keys))?;
+                if let Some((_, mesh)) = cache.mesh.as_ref().filter(|(key, _)| *key == mesh_key) {
+                    cache.reused_features = keys.len();
+                    mesh.clone()
+                } else {
+                    let mesh = ffi::evaluate_cached_model(
+                        cache.native.pin_mut(),
+                        &edges,
+                        &steps,
+                        &planes,
+                        &edits,
+                        &creates,
+                        &keys,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    cache.reused_features = cache.native.reused_features();
+                    cache.mesh = Some((mesh_key, mesh.clone()));
+                    mesh
+                }
+            } else {
                 ffi::evaluate_complete_model(&edges, &steps, &planes, &edits, &creates)
-                    .map_err(|e| e.to_string())?,
-            )
+                    .map_err(|e| e.to_string())?
+            })
         };
         if cancelled() {
             return Err("Evaluation superseded".into());

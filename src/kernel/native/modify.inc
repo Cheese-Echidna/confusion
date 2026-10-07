@@ -1,4 +1,4 @@
-// Included in occt.cpp so shape ownership remains within one native evaluation.
+// Included in occt.cpp; cached shapes remain confined to the owning worker.
 static TopoDS_Face edit_face(const std::vector<Output>& outputs,
                             const std::vector<bool>& consumed, uint32_t ordinal,
                             uint32_t target) {
@@ -69,9 +69,25 @@ static TopoDS_Shape heal_face(const TopoDS_Shape& shape, const TopoDS_Face& face
   throw std::runtime_error("Cannot heal this face and its adjacent feature walls");
 }
 static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consumed,
-                        rust::Slice<const ModifyStep> edits) {
+                        rust::Slice<const ModifyStep> edits, ModelCacheImpl *cache,
+                        rust::Slice<const rust::String> keys, size_t offset) {
   for (size_t n = 0; n < edits.size(); ++n) {
     const auto& e = edits[n];
+    auto *entry = cache ? &cache->edits[n] : nullptr;
+    if (entry && entry->key == std::string(keys[offset + n])) {
+      outputs = detached(entry->outputs);
+      consumed = entry->consumed;
+      ++cache->reused;
+      continue;
+    }
+    auto remember = [&] {
+      if (entry) {
+        entry->key.clear();
+        entry->outputs = detached(outputs);
+        entry->consumed = consumed;
+        entry->key = std::string(keys[offset + n]);
+      }
+    };
     try {
       for(double value : {e.a,e.b,e.c,e.d}) {
         if(!std::isfinite(value) || std::abs(value)>1000.)throw std::runtime_error("Invalid solid edit value");
@@ -197,7 +213,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         BRepBuilderAPI_Transform op(shape,tr,true);result=op.Shape();break;
       }
       case 14: case 15: {
-        if (face.IsNull()) { consumed[e.target]=true;continue; }
+        if (face.IsNull()) { consumed[e.target]=true;remember();continue; }
         result=heal_face(shape,face);break;
       }
       case 16: {
@@ -223,6 +239,7 @@ static void apply_edits(std::vector<Output>& outputs, std::vector<bool>& consume
         TopoDS_Compound copies; BRep_Builder builder; builder.MakeCompound(copies);
         builder.Add(copies,shape);builder.Add(copies,result);outputs[e.target].shape=copies;outputs[e.target].caps.clear();
       } else { outputs[e.target].shape=result;outputs[e.target].caps.clear(); }
+      remember();
     } catch(const Standard_Failure& error) {
       throw std::runtime_error("Solid edit "+std::to_string(n+1)+": "+error.GetMessageString());
     } catch(const std::exception& error) {

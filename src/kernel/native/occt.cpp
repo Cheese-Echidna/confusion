@@ -1,7 +1,8 @@
-// Exact feature evaluation and cap provenance stay inside a single native
-// invocation.
+// Exact feature evaluation and cap provenance stay inside worker-owned native
+// caches; Rust receives only owned derived results.
 #include "confusion/src/kernel/bridge.rs.h"
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -96,6 +97,42 @@ struct Output {
   TopoDS_Shape shape;
   std::vector<Cap> caps;
 };
+// OCCT algorithms can update shared topology. Store detached shapes so later
+// operations cannot mutate previously cached results (including cap identities).
+static Output detached(const Output &source) {
+  BRepBuilderAPI_Copy copy(source.shape, true, false);
+  Output output{copy.Shape(), source.caps};
+  for (auto &cap : output.caps) for (auto &face : cap.faces)
+    face = copy.ModifiedShape(face);
+  return output;
+}
+static std::vector<Output> detached(const std::vector<Output> &sources) {
+  std::vector<Output> result;
+  for (const auto &source : sources) result.push_back(detached(source));
+  return result;
+}
+// Cache entries own native shapes on the evaluation worker. Keys describe inputs,
+// never edit history. One entry per feature bounds retention across edits.
+struct FeatureEntry {
+  std::string key;
+  Output output;
+  std::vector<std::pair<size_t, TopoDS_Shape>> pieces;
+  std::vector<size_t> consumed_targets;
+};
+struct EditEntry {
+  std::string key;
+  std::vector<Output> outputs;
+  std::vector<bool> consumed;
+};
+struct ModelCacheImpl {
+  std::vector<FeatureEntry> features;
+  std::vector<EditEntry> edits;
+  size_t reused = 0;
+};
+ModelCache::ModelCache() : impl(std::make_unique<ModelCacheImpl>()) {}
+ModelCache::~ModelCache() = default;
+size_t ModelCache::reused_features() const { return impl->reused; }
+std::unique_ptr<ModelCache> new_model_cache() { return std::make_unique<ModelCache>(); }
 #include "modify.inc"
 static Mesh mesh_shape(const TopoDS_Shape &shape,
                        const std::vector<Output> &outputs = {},
@@ -290,18 +327,40 @@ static std::vector<Cap> follow_caps(Boolean &operation,
   return caps;
 }
 #include "src/kernel/native/solid_create.inc"
-Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges,
+static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String> keys, rust::Slice<const ProfileEdge> edges,
                     rust::Slice<const ModelStep> steps,
                     rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits, rust::Slice<const CreateStep> creates) {
   try {
     if (steps.size() + creates.size() == 0 || steps.size() > 64 || creates.size() > 64)
       throw std::runtime_error("Invalid model feature count");
+    if (cache) {
+      if (keys.size() != steps.size() + creates.size() + edits.size()) throw std::runtime_error("Invalid cache keys");
+      cache->reused = 0;
+      cache->features.resize(steps.size() + creates.size());
+      cache->edits.resize(edits.size());
+    }
     std::vector<Output> outputs;
     std::vector<bool> consumed;
     std::vector<std::pair<size_t, TopoDS_Shape>> pieces;
     std::vector<gp_Trsf> frames;
     for (size_t index = 0; index < steps.size(); ++index) {
       const auto &step = steps[index];
+      FeatureEntry *entry = cache ? &cache->features[index] : nullptr;
+      if (entry && entry->key == std::string(keys[index])) {
+        if (step.operation != 0 && (step.target < 0 ||
+            static_cast<size_t>(step.target) >= consumed.size() || consumed[step.target]))
+          throw std::runtime_error("Missing or consumed target body");
+        outputs.push_back(detached(entry->output));
+        consumed.push_back(false);
+        if (step.operation != 0) consumed.at(step.target) = true;
+        for (const auto &piece : entry->pieces) {
+          BRepBuilderAPI_Copy copy(piece.second, true, false);
+          pieces.emplace_back(piece.first, copy.Shape());
+        }
+        ++cache->reused;
+        continue;
+      }
+      const auto piece_start = pieces.size();
       try {
         check_depth(step.depth);
         if (step.edge_count == 0 || step.edge_start > edges.size() ||
@@ -378,6 +437,16 @@ Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges,
             throw std::runtime_error("Feature does not change the target body");
           consumed[step.target] = true;
         }
+        if (entry) {
+          entry->key.clear();
+          entry->output = detached(output);
+          entry->pieces.clear();
+          for (size_t p = piece_start; p < pieces.size(); ++p) {
+            BRepBuilderAPI_Copy copy(pieces[p].second, true, false);
+            entry->pieces.emplace_back(pieces[p].first, copy.Shape());
+          }
+          entry->key = std::string(keys[index]);
+        }
         outputs.push_back(std::move(output));
         consumed.push_back(false);
       } catch (const Standard_Failure &e) {
@@ -388,7 +457,7 @@ Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges,
                                  e.what());
       }
     }
-    append_creates(edges, creates, outputs, consumed);
+    append_creates(edges, creates, outputs, consumed, cache, keys, steps.size());
     for (size_t i = 0; i < planes.size(); ++i) {
       ModelStep plane{};
       plane.support = planes[i].support;
@@ -401,7 +470,7 @@ Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges,
                                  ": " + e.what());
       }
     }
-    apply_edits(outputs, consumed, edits);
+    apply_edits(outputs, consumed, edits, cache, keys, steps.size() + creates.size());
     TopoDS_Compound combined;
     BRep_Builder builder;
     builder.MakeCompound(combined);
@@ -428,6 +497,15 @@ Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges,
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(e.GetMessageString());
   }
+}
+Mesh evaluate_complete_model(rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
+    rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits, rust::Slice<const CreateStep> creates) {
+  return evaluate_impl(nullptr, {}, edges, steps, planes, edits, creates);
+}
+Mesh evaluate_cached_model(ModelCache &cache, rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
+    rust::Slice<const FaceRequest> planes, rust::Slice<const ModifyStep> edits, rust::Slice<const CreateStep> creates,
+    rust::Slice<const rust::String> keys) {
+  return evaluate_impl(cache.impl.get(), keys, edges, steps, planes, edits, creates);
 }
 Mesh evaluate_create_model(rust::Slice<const ProfileEdge> edges, rust::Slice<const ModelStep> steps,
                     rust::Slice<const FaceRequest> planes,

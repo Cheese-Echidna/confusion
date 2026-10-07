@@ -62,3 +62,7 @@ required-features = ["solver", "kernel"]
 [[example]]
 name = "performance_review"
 required-features = ["gpu", "solver", "kernel"]
+
+[[example]]
+name = "incremental_review"
+required-features = ["solver", "kernel"]
