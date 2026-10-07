@@ -4,7 +4,7 @@ use confusion::document::{
 };
 use confusion::{persistence::container, sketch::regions};
 use uuid::Uuid;
-fn base() -> (Design, Uuid) {
+fn base_design() -> (Design, Uuid) {
     let mut d = Design::default();
     d.rectangle([0., 0.], [0.08, 0.05]);
     let depth = d.parameter("thickness", "10 mm".into());
@@ -49,7 +49,7 @@ fn add_rectangle(
 }
 #[test]
 fn sketches_switch_without_losing_geometry_and_legacy_round_trip() {
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     let first = d.current_sketch_id().unwrap();
     let next = d
         .create_sketch(SketchPlane::Face {
@@ -74,7 +74,7 @@ fn sketches_switch_without_losing_geometry_and_legacy_round_trip() {
 }
 #[test]
 fn invalid_dependencies_and_cycles_are_rejected() {
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     let cut = add_rectangle(
         &mut d,
         SketchPlane::Face {
@@ -102,7 +102,7 @@ fn invalid_dependencies_and_cycles_are_rejected() {
 #[test]
 fn face_pocket_follows_thickness_width_and_reopens() {
     use confusion::evaluation::solid;
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     let first = d.current_sketch_id().unwrap();
     add_rectangle(
         &mut d,
@@ -159,7 +159,7 @@ fn face_pocket_follows_thickness_width_and_reopens() {
 #[test]
 fn join_and_independent_new_body_have_exact_volumes() {
     use confusion::evaluation::solid;
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     let joined = add_rectangle(
         &mut d,
         SketchPlane::Face {
@@ -197,7 +197,7 @@ fn join_and_independent_new_body_have_exact_volumes() {
 #[test]
 fn split_support_reports_repair_instead_of_choosing_a_face() {
     use confusion::evaluation::solid;
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     let groove = add_rectangle(
         &mut d,
         SketchPlane::Face {
@@ -232,13 +232,13 @@ fn split_support_reports_repair_instead_of_choosing_a_face() {
 }
 #[test]
 fn malformed_active_sketch_and_missing_construction_fail_without_panicking() {
-    let (mut d, _) = base();
+    let (mut d, _) = base_design();
     d.construction.clear();
     d.active_sketch = Some(Uuid::new_v4());
     assert!(d.validate().is_err());
     let dir = tempfile::tempdir().unwrap();
     assert!(container::save(&dir.path().join("bad.con"), &d).is_err());
-    let (mut d, _) = base();
+    let (mut d, _) = base_design();
     let id = d.create_sketch(SketchPlane::Xy).unwrap();
     d.construction.retain(|f| f.id != id);
     assert!(d.validate().is_err());
@@ -246,7 +246,7 @@ fn malformed_active_sketch_and_missing_construction_fail_without_panicking() {
 #[cfg(all(feature = "solver", feature = "kernel"))]
 #[test]
 fn cut_from_bottom_cap_points_inward() {
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     add_rectangle(
         &mut d,
         SketchPlane::Face {
@@ -271,7 +271,7 @@ fn cut_from_bottom_cap_points_inward() {
 #[test]
 fn unused_sketch_attachment_is_validated_and_cancellation_is_observed() {
     use confusion::evaluation::solid;
-    let (mut d, base) = base();
+    let (mut d, base) = base_design();
     let groove = add_rectangle(
         &mut d,
         SketchPlane::Face {
@@ -299,4 +299,85 @@ fn unused_sketch_attachment_is_validated_and_cancellation_is_observed() {
             .unwrap()
             .contains("superseded")
     );
+}
+#[test]
+fn timeline_prefix_owns_the_correct_sketch_without_changing_the_document() {
+    let (mut d, base) = base_design();
+    let first = d.current_sketch_id().unwrap();
+    let next = d
+        .create_sketch(SketchPlane::Face {
+            support: base,
+            producer: base,
+            role: CapRole::End,
+        })
+        .unwrap();
+    d.rectangle([0.01, 0.01], [0.03, 0.02]);
+    let preview = d.through_feature(first).unwrap();
+    assert_eq!(preview.current_sketch_id(), Some(first));
+    assert_eq!(preview.points[2].xy, [0.08, 0.05]);
+    assert!(preview.extrusion.is_none());
+    preview.validate().unwrap();
+    assert_eq!(d.current_sketch_id(), Some(next));
+    assert_eq!(d.points[2].xy, [0.03, 0.02]);
+    let preview = d.through_feature(base).unwrap();
+    assert_eq!(preview.current_sketch_id(), Some(first));
+    assert!(preview.extrusion.is_some());
+    preview.validate().unwrap();
+}
+#[cfg(all(feature = "solver", feature = "kernel"))]
+#[test]
+fn deleted_cap_and_no_op_cut_report_failures() {
+    use confusion::evaluation::solid;
+    let (mut d, base) = base_design();
+    let joined = add_rectangle(
+        &mut d,
+        SketchPlane::Face {
+            support: base,
+            producer: base,
+            role: CapRole::End,
+        },
+        ExtrudeOperation::Join,
+        Some(base),
+        ("fullBoss", "4 mm"),
+        [0., 0.],
+        [0.08, 0.05],
+    );
+    d.create_sketch(SketchPlane::Face {
+        support: joined,
+        producer: base,
+        role: CapRole::End,
+    })
+    .unwrap();
+    let error = solid::evaluate(&d, || false).err().unwrap();
+    assert!(error.contains("deleted"), "{error}");
+    let (mut d, base) = base_design();
+    add_rectangle(
+        &mut d,
+        SketchPlane::Face {
+            support: base,
+            producer: base,
+            role: CapRole::End,
+        },
+        ExtrudeOperation::Cut,
+        Some(base),
+        ("outsideCut", "3 mm"),
+        [0.10, 0.],
+        [0.12, 0.02],
+    );
+    let error = solid::evaluate(&d, || false).err().unwrap();
+    assert!(error.contains("does not change"), "{error}");
+}
+#[test]
+fn failed_sketch_creation_preserves_current_intent() {
+    let (mut d, base) = base_design();
+    let before = serde_json::to_value(&d).unwrap();
+    assert!(
+        d.create_sketch(SketchPlane::Face {
+            support: Uuid::new_v4(),
+            producer: base,
+            role: CapRole::End
+        })
+        .is_err()
+    );
+    assert_eq!(serde_json::to_value(d).unwrap(), before);
 }

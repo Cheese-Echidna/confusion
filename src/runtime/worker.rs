@@ -13,6 +13,7 @@ mod implementation {
     }
     pub struct ResultSnapshot {
         pub revision: u64,
+        pub sketch: Option<uuid::Uuid>,
         pub features: Vec<uuid::Uuid>,
         pub solution: Result<nonlinear::Solution, String>,
         pub mesh: Result<Option<ffi::Mesh>, String>,
@@ -61,9 +62,14 @@ mod implementation {
                                     .as_ref()
                                     .is_some_and(|(r, _)| *r > revision)
                         });
-                        let (solution, mesh, features) = match evaluated {
-                            Ok(model) => (Ok(model.solution), Ok(model.mesh), model.features),
-                            Err(error) => (Err(error.clone()), Err(error), vec![]),
+                        let (solution, mesh, features, sketch) = match evaluated {
+                            Ok(model) => (
+                                Ok(model.solution),
+                                Ok(model.mesh),
+                                model.features,
+                                model.sketch,
+                            ),
+                            Err(error) => (Err(error.clone()), Err(error), vec![], None),
                         };
                         // Drop results already superseded while a native operation was running.
                         if state
@@ -79,6 +85,7 @@ mod implementation {
                         *output.lock().unwrap() = Some(ResultSnapshot {
                             revision,
                             features,
+                            sketch,
                             solution,
                             mesh,
                         });

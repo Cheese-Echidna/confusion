@@ -104,15 +104,15 @@ impl Design {
             .iter()
             .position(|s| s.id == id)
             .ok_or("Missing sketch")?;
-        let next = self.sketches.remove(index);
         let current = self.ensure_sketch();
         let name = self
             .construction
             .iter()
             .find(|f| f.id == current)
-            .unwrap()
+            .ok_or("Missing active sketch construction")?
             .name
             .clone();
+        let next = self.sketches.remove(index);
         self.sketches.push(SketchDefinition {
             id: current,
             name,
@@ -125,21 +125,29 @@ impl Design {
         Ok(())
     }
     pub fn create_sketch(&mut self, plane: SketchPlane) -> Result<Uuid, String> {
-        self.ensure_sketch();
+        self.validate()?;
+        if self.sketches.len() >= 63 {
+            return Err("Document exceeds current sketch count limit".into());
+        }
+        let mut candidate = self.clone();
+        candidate.sync_construction();
+        candidate.ensure_sketch();
         let id = Uuid::new_v4();
-        let name = format!("Sketch {}", self.sketches.len() + 2);
-        self.sketches.push(SketchDefinition {
+        let name = format!("Sketch {}", candidate.sketches.len() + 2);
+        candidate.sketches.push(SketchDefinition {
             id,
             name: name.clone(),
             plane,
             geometry: SketchGeometry::default(),
         });
-        self.construction.push(ConstructionFeature {
+        candidate.construction.push(ConstructionFeature {
             id,
             name,
             kind: ConstructionKind::Sketch,
         });
-        self.activate_sketch(id)?;
+        candidate.activate_sketch(id)?;
+        candidate.validate()?;
+        *self = candidate;
         Ok(id)
     }
     /// Computational input contains only one sketch and shared parameters, never model state.
@@ -215,14 +223,6 @@ impl Design {
             return Err("Document exceeds current modeling limits".into());
         }
         let current = self.current_sketch_id();
-        if self.active_sketch.is_some()
-            && !self
-                .construction
-                .iter()
-                .any(|f| Some(f.id) == current && matches!(f.kind, ConstructionKind::Sketch))
-        {
-            return Err("Missing active sketch".into());
-        }
         let mut sketch_ids = HashSet::new();
         if let Some(id) = current {
             sketch_ids.insert(id);

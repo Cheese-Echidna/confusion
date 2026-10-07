@@ -1022,7 +1022,7 @@ mod implementation {
             let kind = id
                 .and_then(|id| self.design.construction.iter().find(|f| f.id == id))
                 .map(|f| f.kind.clone());
-            if edit {
+            if edit || matches!(kind, Some(ConstructionKind::Sketch)) {
                 let sketch = match kind {
                     Some(ConstructionKind::Sketch) => id,
                     Some(ConstructionKind::Extrude { sketch }) => Some(sketch),
@@ -3371,6 +3371,12 @@ mod implementation {
             {
                 self.evaluated_features = result.features;
                 match result.solution {
+                    Ok(solution) if result.sketch != self.design.current_sketch_id() => {
+                        self.solved.clear();
+                        self.point_dof.clear();
+                        self.conflicts = solution.conflicts;
+                        self.status = "Construction preview".into();
+                    }
                     Ok(solution) => {
                         self.point_dof = solution.point_dof;
                         self.solved = solution.points;

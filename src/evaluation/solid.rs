@@ -15,6 +15,7 @@ mod implementation {
     use uuid::Uuid;
     pub struct EvaluatedModel {
         pub solution: nonlinear::Solution,
+        pub sketch: Option<Uuid>,
         pub mesh: Option<ffi::Mesh>,
         pub features: Vec<Uuid>,
     }
@@ -146,6 +147,7 @@ mod implementation {
             return Err("Evaluation superseded".into());
         }
         Ok(EvaluatedModel {
+            sketch: design.current_sketch_id(),
             solution,
             mesh,
             features: ids,

@@ -290,15 +290,6 @@ impl Design {
         let mut result = self.clone();
         let kept: std::collections::HashSet<_> =
             self.construction[..=index].iter().map(|f| f.id).collect();
-        result.features.retain(|f| kept.contains(&f.id));
-        if result
-            .extrusion
-            .as_ref()
-            .is_some_and(|e| !kept.contains(&e.id))
-        {
-            result.extrusion = None;
-        }
-        result.sketches.retain(|s| kept.contains(&s.id));
         if result
             .current_sketch_id()
             .is_some_and(|id| !kept.contains(&id))
@@ -309,18 +300,17 @@ impl Design {
                 .find(|f| matches!(f.kind, ConstructionKind::Sketch))
                 .ok_or("Missing sketch")?
                 .id;
-            result = self.clone();
             result.activate_sketch(sketch)?;
-            result.features.retain(|f| kept.contains(&f.id));
-            if result
-                .extrusion
-                .as_ref()
-                .is_some_and(|e| !kept.contains(&e.id))
-            {
-                result.extrusion = None;
-            }
-            result.sketches.retain(|s| kept.contains(&s.id));
         }
+        result.features.retain(|f| kept.contains(&f.id));
+        if result
+            .extrusion
+            .as_ref()
+            .is_some_and(|e| !kept.contains(&e.id))
+        {
+            result.extrusion = None;
+        }
+        result.sketches.retain(|s| kept.contains(&s.id));
         result.construction.truncate(index + 1);
         Ok(result)
     }
