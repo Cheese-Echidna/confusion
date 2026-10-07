@@ -163,6 +163,8 @@ pub mod ffi {
             token: &EvaluationCancellation,
         ) -> Result<Mesh>;
         fn reused_features(self: &ModelCache) -> usize;
+        fn write_step(cache: &ModelCache, path: &str) -> Result<Inspection>;
+        fn inspect_step(path: &str) -> Result<Mesh>;
         fn evaluate_model(
             edges: &[ProfileEdge],
             steps: &[ModelStep],

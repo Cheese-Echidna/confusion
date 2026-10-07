@@ -3,8 +3,9 @@
 
 Generate fixtures with the performance_review Rust example first, then run:
   nix-shell --run 'python3 examples/desktop_performance_review.py'
-Requires a desktop display. The temporary build uses the existing Cargo target
-cache and copies its executable before running. No mouse/keyboard input is sent.
+Requires a desktop display. Instrumented builds use a separate Cargo target
+cache under reviews/desktop-performance and copy their executable before running.
+No mouse/keyboard input is sent.
 """
 import argparse
 import json
@@ -24,6 +25,9 @@ parser.add_argument("--backtraces", choices=["0", "1"], nargs="+", default=["0",
 parser.add_argument("--viewport-size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"), help="Force viewport logical size (physical size is recorded in results)")
 args = parser.parse_args()
 source = pathlib.Path(__file__).resolve().parents[1]
+# Instrumented libraries must also be isolated from the production Cargo cache.
+production_metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=source))
+os.environ["CARGO_TARGET_DIR"] = str(pathlib.Path(production_metadata["target_directory"]) / "reviews" / "desktop-performance")
 temporary = tempfile.TemporaryDirectory(prefix="confusion-desktop-review-")
 target = pathlib.Path(temporary.name) / "source"
 target.mkdir()
@@ -94,11 +98,14 @@ if args.font_family:
     text = p.read_text()
     assert text.count('.font_family(self.ui_font_family.clone())') == 1
     p.write_text(text.replace('.font_family(self.ui_font_family.clone())', '.font_family(' + json.dumps(args.font_family) + ')'))
+review_manifest = target / "Cargo.toml"
+manifest_text = review_manifest.read_text().replace('edition = "2024"', 'edition = "2024"\nautobins = false', 1)
+review_manifest.write_text(manifest_text + '\n[[bin]]\nname = "confusion-desktop-review"\npath = "src/main.rs"\n')
 manifest = str(target / "Cargo.toml")
-subprocess.run(["cargo", "build", "--locked", "--release", "--features", "desktop", "--manifest-path", manifest], cwd=source, check=True)
+subprocess.run(["cargo", "build", "--locked", "--release", "--features", "desktop", "--bin", "confusion-desktop-review", "--manifest-path", manifest], cwd=source, check=True)
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1", "--manifest-path", manifest], cwd=source))
 binary = pathlib.Path(temporary.name) / "confusion-review"
-shutil.copy2(pathlib.Path(metadata["target_directory"]) / "release" / "confusion", binary)
+shutil.copy2(pathlib.Path(metadata["target_directory"]) / "release" / "confusion-desktop-review", binary)
 results = []
 for trace in args.backtraces:
     for pockets in args.pockets:

@@ -32,6 +32,8 @@ fn main() {
             "TKHLR",
             "TKFeat",
             "TKShHealing",
+            "TKDESTEP",
+            "TKXSBase",
         ] {
             println!("cargo:rustc-link-lib={name}");
         }
@@ -41,6 +43,7 @@ fn main() {
             "src/kernel/native/occt.hpp",
             "src/kernel/native/solid_create.inc",
             "src/kernel/native/modify.inc",
+            "src/kernel/native/step.inc",
             "src/kernel/native/inspect.hpp",
             "src/kernel/native/cancellation.hpp",
         ] {

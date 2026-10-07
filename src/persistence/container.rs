@@ -21,6 +21,10 @@ pub fn save(path: &Path, design: &Design) -> Result<(), String> {
     let mut design = design.clone();
     design.sync_construction();
     design.validate()?;
+    let intent = serde_json::to_vec_pretty(&design).map_err(|e| e.to_string())?;
+    if intent.len() as u64 > LIMIT {
+        return Err("Document entry exceeds size limit".into());
+    }
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -45,14 +49,12 @@ pub fn save(path: &Path, design: &Design) -> Result<(), String> {
     writer
         .start_file("design.json", options)
         .map_err(|e| e.to_string())?;
-    writer
-        .write_all(&serde_json::to_vec_pretty(&design).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    writer
-        .finish()
-        .map_err(|e| e.to_string())?
-        .sync_all()
-        .map_err(|e| e.to_string())?;
+    writer.write_all(&intent).map_err(|e| e.to_string())?;
+    let archive = writer.finish().map_err(|e| e.to_string())?;
+    if archive.metadata().map_err(|e| e.to_string())?.len() > LIMIT {
+        return Err("File exceeds current document size limit".into());
+    }
+    archive.sync_all().map_err(|e| e.to_string())?;
     temporary.persist(path).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     File::open(dir)

@@ -87,6 +87,7 @@ mod implementation {
     }
     #[derive(Clone)]
     struct DocumentTab {
+        recovery_id: Uuid,
         design: Design,
         dirty: bool,
         undo: Vec<Design>,
@@ -101,6 +102,10 @@ mod implementation {
     }
 
     pub struct WorkspaceView {
+        recovery: Option<crate::persistence::recovery::RecoveryManager>,
+        recovery_schedule: crate::application::session::RecoverySchedule,
+        recovery_check: std::time::Instant,
+        recovery_tracked: HashSet<Uuid>,
         dirty_cache: Cell<(u64, bool)>,
         extrude_drag: Option<(Point<Pixels>, f64, [f64; 2])>,
         create_editor: Option<CreateEditor>,
@@ -118,6 +123,7 @@ mod implementation {
             std::sync::mpsc::Receiver<Option<PathBuf>>,
         )>,
         export_result: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+        step_export_dialog: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
         close_choice: usize,
         close_target: Option<CloseTarget>,
         close_approved: HashSet<usize>,
@@ -217,6 +223,7 @@ mod implementation {
     include!("solid_create.rs");
     include!("solid_modify.rs");
     include!("solid_inspect.rs");
+    include!("step_exchange.rs");
 
     impl WorkspaceView {
         pub fn new(surface: WgpuSurfaceHandle, cx: &mut Context<Self>) -> Self {
@@ -246,7 +253,14 @@ mod implementation {
             gpu.set_mesh(&[], &[]);
             let keymap = crate::settings::keymap::load();
             let keymap_error = keymap.as_ref().err().cloned();
+            let recovery = crate::platform::paths::recovery_directory()
+                .and_then(|path| crate::persistence::recovery::RecoveryManager::new(&path));
+            let recovery_error = recovery.as_ref().err().cloned();
             Self {
+                recovery: recovery.ok(),
+                recovery_schedule: Default::default(),
+                recovery_check: std::time::Instant::now(),
+                recovery_tracked: HashSet::new(),
                 dirty_cache: Cell::new((u64::MAX, false)),
                 extrude_drag: None,
                 create_editor: None,
@@ -261,6 +275,7 @@ mod implementation {
                 native_dialog: None,
                 export_dialog: None,
                 export_result: None,
+                step_export_dialog: None,
                 close_choice: 2,
                 close_target: None,
                 close_approved: Default::default(),
@@ -279,7 +294,7 @@ mod implementation {
                 bounds: Rc::new(Cell::new(None)),
                 drag: None,
                 focus: cx.focus_handle(),
-                error: keymap_error,
+                error: keymap_error.or(recovery_error),
                 design: Design::default(),
                 worker: Worker::new(),
                 revision: 0,
@@ -320,6 +335,7 @@ mod implementation {
                 sketch_region: None,
                 before_construction: false,
                 documents: vec![DocumentTab {
+                    recovery_id: Uuid::new_v4(),
                     design: Design::default(),
                     dirty: false,
                     undo: vec![],
@@ -904,8 +920,133 @@ mod implementation {
             self.rebuild(cx);
             self.fit();
         }
+        fn forget_recovery(&mut self, index: usize) {
+            if let Some(manager) = &mut self.recovery {
+                if let Err(error) = manager.forget(self.documents[index].recovery_id) {
+                    self.error = Some(error);
+                }
+            }
+        }
+        fn poll_recovery(&mut self, _cx: &mut Context<Self>) {
+            if let Some(result) = self.recovery.as_mut().and_then(|m| m.poll()) {
+                if let Err(error) = result {
+                    self.error = Some(error);
+                    self.recovery_schedule.failed();
+                }
+            }
+            let now = std::time::Instant::now();
+            if now.duration_since(self.recovery_check).as_secs() < 1 {
+                return;
+            }
+            self.recovery_check = now;
+            if self.recovery.is_none() {
+                return;
+            }
+            let mut hash = blake3::Hasher::new();
+            let mut dirty = vec![];
+            for (index, tab) in self.documents.iter().enumerate() {
+                let (design, saved) = if index == self.active_document {
+                    (&self.design, self.saved_fingerprint)
+                } else {
+                    (&tab.design, tab.saved_fingerprint)
+                };
+                let fingerprint = crate::document::dirty::fingerprint(design);
+                if fingerprint != saved && !self.close_approved.contains(&index) {
+                    hash.update(tab.recovery_id.as_bytes());
+                    hash.update(fingerprint.as_bytes());
+                    dirty.push((tab.recovery_id, design));
+                }
+            }
+            let current: HashSet<_> = dirty.iter().map(|(id, _)| *id).collect();
+            let removed: Vec<_> = self
+                .recovery_tracked
+                .difference(&current)
+                .copied()
+                .collect();
+            for id in removed {
+                match self.recovery.as_mut().unwrap().forget(id) {
+                    Ok(()) => {
+                        self.recovery_tracked.remove(&id);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            if self.recovery_schedule.observe(hash.finalize(), now) {
+                let snapshots = dirty
+                    .into_iter()
+                    .map(|(id, design)| (id, design.clone()))
+                    .collect();
+                if self.recovery.as_mut().unwrap().snapshot(snapshots) {
+                    self.recovery_tracked = current;
+                    self.recovery_schedule.submitted(now);
+                }
+            }
+        }
+        fn recovery_prompt(&self, cx: &mut Context<Self>) -> Option<Div> {
+            let candidate = self.recovery.as_ref()?.candidates.first()?;
+            let damaged = candidate.error.is_some();
+            Some(
+                div()
+                    .absolute()
+                    .top(px(70.))
+                    .left(px(20.))
+                    .p_4()
+                    .bg(rgb(t::PANEL))
+                    .child("Unsaved work from a previous session")
+                    .child(candidate.label.clone())
+                    .child(candidate.error.clone().unwrap_or_else(|| {
+                        "Recover into an unsaved tab, or discard this snapshot.".into()
+                    }))
+                    .child(
+                        text_button("recover-snapshot", "Recover", "Restore document").when(
+                            !damaged,
+                            |el| {
+                                el.on_click(cx.listener(|this, _, _, cx| {
+                                    let result = this.recovery.as_mut().unwrap().recover(0);
+                                    match result {
+                                        Ok((id, design)) => {
+                                            this.new_document(cx);
+                                            this.documents[this.active_document].recovery_id = id;
+                                            this.recovery_tracked.insert(id);
+                                            this.design = design;
+                                            this.saved_path = None;
+                                            this.saved_fingerprint =
+                                                blake3::hash(b"recovered unsaved document");
+                                            this.dirty_cache.set((u64::MAX, false));
+                                            this.path =
+                                                cx.new(|cx| TextInput::new("Recovered.con", cx));
+                                            this.restore_edit(cx);
+                                            this.status =
+                                                "Recovered document; save it to keep your work"
+                                                    .into();
+                                        }
+                                        Err(error) => {
+                                            this.error = Some(format!("Recovery failed: {error}"))
+                                        }
+                                    }
+                                    cx.notify();
+                                }))
+                            },
+                        ),
+                    )
+                    .child(
+                        text_button(
+                            "discard-snapshot",
+                            "Discard",
+                            "Permanently remove this snapshot",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Err(error) = this.recovery.as_mut().unwrap().discard(0) {
+                                this.error = Some(error);
+                            }
+                            cx.notify();
+                        })),
+                    ),
+            )
+        }
         fn stash_document(&mut self, cx: &App) {
             self.documents[self.active_document] = DocumentTab {
+                recovery_id: self.documents[self.active_document].recovery_id,
                 design: self.design.clone(),
                 dirty: crate::document::dirty::fingerprint(&self.design) != self.saved_fingerprint,
                 undo: self.undo.clone(),
@@ -948,9 +1089,11 @@ mod implementation {
             self.body_faces.clear();
             self.gpu.set_mesh(&[], &[]);
             self.stash_document(cx);
+            self.forget_recovery(index);
             self.documents.remove(index);
             if self.documents.is_empty() {
                 self.documents.push(DocumentTab {
+                    recovery_id: Uuid::new_v4(),
                     design: Design::default(),
                     dirty: false,
                     undo: vec![],
@@ -995,6 +1138,7 @@ mod implementation {
             self.documents
                 .push(self.documents[self.active_document].clone());
             self.active_document = self.documents.len() - 1;
+            self.documents[self.active_document].recovery_id = Uuid::new_v4();
             self.undo.clear();
             self.redo.clear();
             self.design = Design::default();
@@ -1094,6 +1238,16 @@ mod implementation {
                 cx.notify();
                 false
             } else {
+                for index in 0..self.documents.len() {
+                    self.forget_recovery(index);
+                }
+                // Final intentional shutdown drains ordered cleanup before process exit.
+                if let Some(manager) = &self.recovery {
+                    if let Err(error) = manager.flush() {
+                        self.error = Some(error);
+                        return false;
+                    }
+                }
                 true
             }
         }
@@ -1195,6 +1349,7 @@ mod implementation {
             }
             match crate::persistence::container::save(&path, &self.design) {
                 Ok(()) => {
+                    self.forget_recovery(self.active_document);
                     self.saved_path = Some(path.clone());
                     self.saved_fingerprint = crate::document::dirty::fingerprint(&self.design);
                     self.dirty_cache.set((u64::MAX, false));
@@ -1338,8 +1493,10 @@ mod implementation {
             };
             match action {
                 Action::ImportFusion => self.start_file_dialog(true, cx),
+                Action::ExportStep => self.request_step_export(cx),
                 Action::Export(format) => {
                     if self.export_dialog.is_none()
+                        && self.step_export_dialog.is_none()
                         && self.export_result.is_none()
                         && self.native_dialog.is_none()
                     {
@@ -3510,7 +3667,7 @@ mod implementation {
                         id: "export-step",
                         name: "STEP",
                         icon: "export",
-                        action: None,
+                        action: Some(Action::ExportStep),
                     },
                     Feature {
                         id: "export-stl",
@@ -4372,6 +4529,8 @@ mod implementation {
                 self.menu = None;
                 self.menu_leave_deadline = None;
             }
+            self.poll_recovery(cx);
+            self.poll_step_export();
             if !self.close_hook_installed {
                 let entity = cx.entity().downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
@@ -4710,6 +4869,7 @@ mod implementation {
                 )
                 .children(menu)
                 .children(self.close_confirmation(cx))
+                .children(self.recovery_prompt(cx))
         }
     }
 }

@@ -1,7 +1,7 @@
 This is confusion; a fully parametric constraint-based 3D modeling software built on GPUI.rs.
 It is heavily inspired by Autodesk Fusion.
 It has two main modes sketch mode and model mode files are saved with the .con extension in a parametric fashion and do not contain edit history but are still fully parametric.
-Printing export supports binary STL and 3MF. STEP export remains unimplemented.
+Printing export supports binary STL and 3MF. Exact solid exchange supports flattened AP214 STEP export.
 The user interface is heavily inspired by Fusion and where applicable also the Zed IDE.
 There are configurable context-depended keyboard shortcuts. The default for those shortcuts is based on fusion.
 All settings for the application are in a single JSON file.
@@ -50,6 +50,7 @@ validation, dependency details and current limits.
 - [Architecture and implementation gates](docs/architecture.md)
 - [Library selections and backend integration decisions](docs/libraries.md)
 - [Feature parity checklist](docs/feature-parity.md)
+- [Current priorities and substantial parity gaps](docs/project-priorities.md)
 - [Rust file map](docs/file-map.md)
 
 Headless checks: `cargo test --lib` and `cargo fmt --check`. The GPU smoke check uses
@@ -69,6 +70,9 @@ The desktop enables the numerical solver and native OCCT bridge; neither is
 required for headless document validation or `.con` persistence.
 
 See [import and export](docs/import-export.md) for printing exports and the limited editable Fusion transfer workflow. Direct native Fusion archive decoding is not implemented.
+
+See [exact STEP export](docs/step-export.md), [local crash recovery](docs/crash-recovery.md),
+and [parametric sketch editing fixes](docs/curved-sketch-editing.md) for current behavior and limits.
 
 The evaluation worker reuses unchanged sketch solutions and native feature shapes.
 See [incremental regeneration](docs/incremental-regeneration.md) for invalidation

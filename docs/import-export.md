@@ -1,5 +1,12 @@
 # Import and export
 
+Choose **Export → STEP** for exact solid geometry. The exporter evaluates the full
+current design and writes flattened AP214 B-reps in millimetres on a background
+worker. It preserves the previous destination if evaluation or writing fails.
+STEP output excludes sketches, constraints, feature intent, materials and assembly
+hierarchy. STEP document import remains unimplemented. See
+[exact STEP export](step-export.md) for validation and current limits.
+
 Choose **Export → STL (millimetres)** or **Export → 3MF** and select a destination.
 The exporter evaluates the current complete design on a background worker before
 writing. It does not export a stale viewport mesh or the timeline preview. Failed

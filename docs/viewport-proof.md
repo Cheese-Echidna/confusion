@@ -22,15 +22,15 @@ loader paths. It uses the system's `<nixpkgs>` channel; it is not a pinned flake
 A working graphics driver and display server are required for the desktop view.
 No accounts, cloud services or model network requests are used.
 
-| Input | Behavior |
-| --- | --- |
-| Left click | Select the visible face, or clear selection on background |
-| Middle drag | Pan in the view plane |
-| Shift + middle drag, or right drag | Orbit around the view target |
-| Scroll | Zoom, bounded to avoid near/far extremes |
-| F / Fit view button | Center and fit the solid, retaining view orientation/projection |
-| Escape | Clear selection and cancel pending selection |
-| Projection button | Toggle perspective/orthographic |
+| Input                              | Behavior                                                        |
+| ---------------------------------- | --------------------------------------------------------------- |
+| Left click                         | Select the visible face, or clear selection on background       |
+| Middle drag                        | Pan in the view plane                                           |
+| Shift + middle drag, or right drag | Orbit around the view target                                    |
+| Scroll                             | Zoom, bounded to avoid near/far extremes                        |
+| F / Fit view button                | Center and fit the solid, retaining view orientation/projection |
+| Escape                             | Clear selection and cancel pending selection                    |
+| Projection button                  | Toggle perspective/orthographic                                 |
 
 These controls are local to this proof. The planned single JSON settings file and
 context-dependent command/keymap registry are not implemented yet.

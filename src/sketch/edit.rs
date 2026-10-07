@@ -75,7 +75,12 @@ pub fn delete(d: &mut Design, selection: &[Uuid]) {
         )
         .chain(d.ellipses.iter().flat_map(|e| [e.center, e.major, e.minor]))
         .chain(d.splines.iter().flat_map(|s| s.points.iter().copied()))
-        .chain(d.constraints.iter().flat_map(|c| c.kind.references()))
+        .chain(
+            d.constraints
+                .iter()
+                .chain(&d.driven_dimensions)
+                .flat_map(|c| c.kind.references()),
+        )
         .collect();
     d.points.retain(|p| used.contains(&p.id));
     let constraints: Vec<_> = d
@@ -133,6 +138,37 @@ pub fn fixed(d: &mut Design, ids: &[Uuid]) {
 }
 /// Split a straight edge at a projected point, preserving H/V relationships on both pieces.
 pub fn split(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
+    if !p.iter().all(|v| v.is_finite()) {
+        return Err("Edit position must be finite".into());
+    }
+    let mut candidate = d.clone();
+    let original_sketch = candidate.current_sketch_id();
+    let original_active = candidate.active_sketch;
+    let owner = candidate
+        .sketches
+        .iter()
+        .find(|s| {
+            s.geometry.lines.iter().any(|c| c.id == id)
+                || s.geometry.circles.iter().any(|c| c.id == id)
+        })
+        .map(|s| s.id);
+    if let Some(owner) = owner {
+        candidate.activate_sketch(owner)?;
+    }
+    let original_points = curve_points(&candidate, id);
+    split_inner(&mut candidate, id, p)?;
+    remove_detached_points(&mut candidate, &original_points);
+    if owner.is_some() {
+        if let Some(original) = original_sketch {
+            candidate.activate_sketch(original)?;
+        }
+        candidate.active_sketch = original_active;
+    }
+    candidate.validate()?;
+    *d = candidate;
+    Ok(())
+}
+fn split_inner(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
     if d.circles.iter().any(|c| c.id == id) {
         return break_circle(d, id, p);
     }
@@ -159,7 +195,7 @@ pub fn split(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
         }
     }
     // A line-length dimension must remain attached to the original endpoints, not a shortened piece.
-    for c in &mut d.constraints {
+    for c in d.constraints.iter_mut().chain(&mut d.driven_dimensions) {
         if let C::Length { line, parameter } = c.kind
             && line == id
         {
@@ -222,6 +258,37 @@ fn intersections(d: &Design, id: Uuid) -> Result<Vec<f64>, String> {
     Ok(ts)
 }
 pub fn trim(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
+    if !p.iter().all(|v| v.is_finite()) {
+        return Err("Edit position must be finite".into());
+    }
+    let mut candidate = d.clone();
+    let original_sketch = candidate.current_sketch_id();
+    let original_active = candidate.active_sketch;
+    let owner = candidate
+        .sketches
+        .iter()
+        .find(|s| {
+            s.geometry.lines.iter().any(|c| c.id == id)
+                || s.geometry.circles.iter().any(|c| c.id == id)
+        })
+        .map(|s| s.id);
+    if let Some(owner) = owner {
+        candidate.activate_sketch(owner)?;
+    }
+    let original_points = curve_points(&candidate, id);
+    trim_inner(&mut candidate, id, p)?;
+    remove_detached_points(&mut candidate, &original_points);
+    if owner.is_some() {
+        if let Some(original) = original_sketch {
+            candidate.activate_sketch(original)?;
+        }
+        candidate.active_sketch = original_active;
+    }
+    candidate.validate()?;
+    *d = candidate;
+    Ok(())
+}
+fn trim_inner(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
     if d.circles.iter().any(|c| c.id == id) {
         return trim_circle(d, id, p);
     }
@@ -229,7 +296,7 @@ pub fn trim(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
         .lines
         .iter()
         .find(|l| l.id == id)
-        .ok_or("Trim currently requires a straight line")?
+        .ok_or("Trim supports lines, circles and arcs; ellipses and splines are unsupported")?
         .clone();
     let [a, b] = l.ends.map(|id| point(d, id));
     let v = [b[0] - a[0], b[1] - a[1]];
@@ -247,19 +314,89 @@ pub fn trim(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
         .unwrap_or(1.);
     let at = |t: f64| [a[0] + t * v[0], a[1] + t * v[1]];
     let construction = d.construction_geometry.contains(&id);
-    // Changed edges invalidate their constraints explicitly; unaffected edges retain their IDs.
-    delete(d, &[id]);
-    for (start, end) in [(0., lo), (hi, 1.)] {
-        if end - start > 1e-8 {
-            let next = d.line(at(start), at(end));
+    let pieces = [(0., lo), (hi, 1.)]
+        .into_iter()
+        .filter(|(a, b)| b - a > 1e-8)
+        .collect::<Vec<_>>();
+    if pieces.is_empty() {
+        delete(d, &[id]);
+        return Ok(());
+    }
+    invalidate_curve_relationships(d, id, false);
+    let hv = d
+        .constraints
+        .iter()
+        .filter_map(|c| match c.kind {
+            C::Horizontal { line } if line == id => Some(true),
+            C::Vertical { line } if line == id => Some(false),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, (start, end)) in pieces.into_iter().enumerate() {
+        let ends = [
+            if start == 0. {
+                l.ends[0]
+            } else {
+                d.point(at(start))
+            },
+            if end == 1. {
+                l.ends[1]
+            } else {
+                d.point(at(end))
+            },
+        ];
+        if index == 0 {
+            d.lines.iter_mut().find(|l| l.id == id).unwrap().ends = ends;
+        } else {
+            let next = Uuid::new_v4();
+            d.lines
+                .push(crate::document::schema::Line { id: next, ends });
             if construction {
-                d.construction_geometry.push(next)
+                d.construction_geometry.push(next);
+            }
+            for horizontal in &hv {
+                d.constrain(if *horizontal {
+                    C::Horizontal { line: next }
+                } else {
+                    C::Vertical { line: next }
+                });
             }
         }
     }
     Ok(())
 }
 pub fn extend(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
+    if !p.iter().all(|v| v.is_finite()) {
+        return Err("Edit position must be finite".into());
+    }
+    let mut candidate = d.clone();
+    let original_sketch = candidate.current_sketch_id();
+    let original_active = candidate.active_sketch;
+    let owner = candidate
+        .sketches
+        .iter()
+        .find(|s| {
+            s.geometry.lines.iter().any(|c| c.id == id)
+                || s.geometry.circles.iter().any(|c| c.id == id)
+        })
+        .map(|s| s.id);
+    if let Some(owner) = owner {
+        candidate.activate_sketch(owner)?;
+    }
+    let original_points = curve_points(&candidate, id);
+    extend_inner(&mut candidate, id, p)?;
+    remove_detached_points(&mut candidate, &original_points);
+    if owner.is_some() {
+        if let Some(original) = original_sketch {
+            candidate.activate_sketch(original)?;
+        }
+        candidate.active_sketch = original_active;
+    }
+    candidate.validate()?;
+    *d = candidate;
+    Ok(())
+}
+fn extend_inner(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
     if d.circles.iter().any(|c| c.id == id) {
         return extend_arc(d, id, p);
     }
@@ -267,7 +404,7 @@ pub fn extend(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
         .lines
         .iter()
         .find(|l| l.id == id)
-        .ok_or("Extend currently requires a straight line")?
+        .ok_or("Extend supports lines and arcs; ellipses and splines are unsupported")?
         .clone();
     let [a, b] = l.ends.map(|id| point(d, id));
     let v = [b[0] - a[0], b[1] - a[1]];
@@ -281,10 +418,7 @@ pub fn extend(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
     .ok_or("No intersection to extend to")?;
     let new = d.point([a[0] + t * v[0], a[1] + t * v[1]]);
     d.lines.iter_mut().find(|l| l.id == id).unwrap().ends[usize::from(!start)] = new;
-    d.constraints.retain(|c| {
-        !c.kind.references().contains(&id)
-            || matches!(c.kind, C::Horizontal { .. } | C::Vertical { .. })
-    });
+    invalidate_curve_relationships(d, id, false);
     Ok(())
 }
 /// Offset independent lines and circles. New geometry retains editable H/V relationships.
@@ -956,7 +1090,8 @@ fn line_circle(a: [f64; 2], b: [f64; 2], center: [f64; 2], radius: f64) -> Vec<f
     let bb = 2. * (v[0] * q[0] + v[1] * q[1]);
     let cc = q[0] * q[0] + q[1] * q[1] - radius * radius;
     let discriminant = bb * bb - 4. * aa * cc;
-    if discriminant < -1e-16 || aa < 1e-20 {
+    let tolerance = 1e-12 * (bb * bb + (4. * aa * cc).abs()).max(1e-30);
+    if discriminant < -tolerance || aa < 1e-24 {
         return vec![];
     }
     let h = discriminant.max(0.).sqrt();
@@ -1023,6 +1158,9 @@ fn trim_circle(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
         ((p[1] - center[1]).atan2(p[0] - center[0]) - start).rem_euclid(tau)
     });
     let angle = ((p[1] - center[1]).atan2(p[0] - center[0]) - start).rem_euclid(tau);
+    if c.end.is_some() && angle > sweep + 1e-8 {
+        return Err("Trim point must lie on the arc".into());
+    }
     let mut cuts = circle_intersections(d, &c)
         .iter()
         .map(|p| ((p[1] - center[1]).atan2(p[0] - center[0]) - start).rem_euclid(tau))
@@ -1066,27 +1204,39 @@ fn trim_circle(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
             pieces.push((upper, sweep))
         }
     }
+    if pieces.is_empty() {
+        delete(d, &[id]);
+        return Ok(());
+    }
     let construction = d.construction_geometry.contains(&id);
-    let dimensions=d.constraints.iter().filter(|constraint|matches!(constraint.kind,C::Radius{circle,..}|C::Diameter{circle,..} if circle==id)).cloned().collect::<Vec<_>>();
-    delete(d, &[id]);
-    for (start, end) in pieces {
-        let next = circle(d, center, at(start), Some(at(end)))?;
-        if construction {
-            d.construction_geometry.push(next)
-        }
-        for constraint in &dimensions {
-            let kind = match constraint.kind {
-                C::Radius { parameter, .. } => C::Radius {
-                    circle: next,
-                    parameter,
-                },
-                C::Diameter { parameter, .. } => C::Diameter {
-                    circle: next,
-                    parameter,
-                },
-                _ => unreachable!(),
-            };
-            d.constrain(kind)
+    invalidate_curve_relationships(d, id, true);
+    for (index, (start, end)) in pieces.into_iter().enumerate() {
+        let rim = if start.abs() < 1e-8 {
+            c.rim
+        } else {
+            d.point(at(start))
+        };
+        let end = if (end - sweep).abs() < 1e-8 && c.end.is_some() {
+            c.end.unwrap()
+        } else {
+            d.point(at(end))
+        };
+        if index == 0 {
+            let original = d.circles.iter_mut().find(|c| c.id == id).unwrap();
+            original.rim = rim;
+            original.end = Some(end);
+        } else {
+            let next = Uuid::new_v4();
+            d.circles.push(Circle {
+                id: next,
+                center: c.center,
+                rim,
+                end: Some(end),
+            });
+            d.constrain(C::Equal { curves: [id, next] });
+            if construction {
+                d.construction_geometry.push(next);
+            }
         }
     }
     Ok(())
@@ -1114,7 +1264,13 @@ fn break_circle(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
     }
     let split = d.point(at);
     d.circles.iter_mut().find(|c| c.id == id).unwrap().end = Some(split);
-    let next = circle(d, center, at, Some(endpoint))?;
+    let next = Uuid::new_v4();
+    d.circles.push(Circle {
+        id: next,
+        center: original.center,
+        rim: split,
+        end: Some(end),
+    });
     d.constrain(C::Equal { curves: [id, next] });
     if d.construction_geometry.contains(&id) {
         d.construction_geometry.push(next)
@@ -1159,5 +1315,52 @@ fn extend_arc(d: &mut Design, id: Uuid, p: [f64; 2]) -> Result<(), String> {
     } else {
         arc.end = Some(point)
     }
+    invalidate_curve_relationships(d, id, true);
     Ok(())
+}
+
+/// Retain support geometry dimensions and orientation; remove relationships whose
+/// curve endpoint interpretation changed. Point constraints remain on their original points.
+fn invalidate_curve_relationships(d: &mut Design, id: Uuid, circular: bool) {
+    let keep = |c: &crate::document::schema::Constraint| {
+        !c.kind.references().contains(&id)
+            || if circular {
+                matches!(
+                    c.kind,
+                    C::Radius { .. } | C::Diameter { .. } | C::Equal { .. }
+                )
+            } else {
+                matches!(
+                    c.kind,
+                    C::Horizontal { .. }
+                        | C::Vertical { .. }
+                        | C::Parallel { .. }
+                        | C::Perpendicular { .. }
+                )
+            }
+    };
+    d.constraints.retain(keep);
+    d.driven_dimensions.retain(keep);
+    let live = d
+        .constraints
+        .iter()
+        .chain(&d.driven_dimensions)
+        .map(|c| c.id)
+        .collect::<Vec<_>>();
+    d.dimension_positions.retain(|id, _| live.contains(id));
+}
+
+fn remove_detached_points(d: &mut Design, original: &[Uuid]) {
+    let used = crate::sketch::entities::curve_ids(d)
+        .into_iter()
+        .flat_map(|id| curve_points(d, id))
+        .chain(
+            d.constraints
+                .iter()
+                .chain(&d.driven_dimensions)
+                .flat_map(|c| c.kind.references()),
+        )
+        .collect::<Vec<_>>();
+    d.points
+        .retain(|p| !original.contains(&p.id) || used.contains(&p.id));
 }

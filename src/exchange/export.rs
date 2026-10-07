@@ -29,15 +29,21 @@ impl ExportMesh {
         let mut lookup = HashMap::new();
         let mut remap = Vec::new();
         for p in vertices {
-            if p.iter()
-                .any(|v| !v.is_finite() || (v * 1000.).abs() > f32::MAX as f64)
-            {
+            if p.iter().any(|v| !v.is_finite() || !(v * 1000.).is_finite()) {
                 return Err("Invalid export coordinate".into());
             }
             // OCCT tessellates faces independently; weld seams at one nanometre.
             let key = p.map(|v| {
-                let value = (v * 1e9).round();
-                if value == 0. { 0 } else { value.to_bits() }
+                let scaled = v * 1e9;
+                let value = if scaled.is_finite() {
+                    scaled.round()
+                } else {
+                    v
+                };
+                (
+                    scaled.is_finite(),
+                    if value == 0. { 0 } else { value.to_bits() },
+                )
             });
             let index = *lookup.entry(key).or_insert_with(|| {
                 let id = welded.len() as u32;
@@ -57,12 +63,8 @@ impl ExportMesh {
             if result[0] == result[1] || result[1] == result[2] || result[2] == result[0] {
                 return Err("Degenerate export triangle".into());
             }
-            let a = nalgebra::Vector3::from(welded[result[0] as usize]);
-            let b = nalgebra::Vector3::from(welded[result[1] as usize]);
-            let c = nalgebra::Vector3::from(welded[result[2] as usize]);
-            if (b - a).cross(&(c - a)).norm_squared() == 0. {
-                return Err("Degenerate export triangle".into());
-            }
+            triangle_normal(result.map(|i| welded[i as usize]))
+                .ok_or("Degenerate export triangle")?;
             triangles.push(result);
         }
         Ok(Self {
@@ -70,6 +72,38 @@ impl ExportMesh {
             triangles,
         })
     }
+}
+
+/// Scale edges before taking their cross product to avoid overflow in area or norm.
+pub(crate) fn triangle_normal(points: [[f64; 3]; 3]) -> Option<[f64; 3]> {
+    let mut edges = [0.; 6];
+    for i in 0..3 {
+        edges[i] = points[1][i] - points[0][i];
+        edges[i + 3] = points[2][i] - points[0][i];
+    }
+    if edges.iter().any(|v| !v.is_finite()) {
+        let scale = points.iter().flatten().map(|v| v.abs()).fold(0., f64::max);
+        for i in 0..3 {
+            edges[i] = points[1][i] / scale - points[0][i] / scale;
+            edges[i + 3] = points[2][i] / scale - points[0][i] / scale;
+        }
+    }
+    for edge in edges.chunks_exact_mut(3) {
+        let scale = edge.iter().map(|v| v.abs()).fold(0., f64::max);
+        if scale == 0. || !scale.is_finite() {
+            return None;
+        }
+        for value in edge {
+            *value /= scale;
+        }
+    }
+    let cross = [
+        edges[1] * edges[5] - edges[2] * edges[4],
+        edges[2] * edges[3] - edges[0] * edges[5],
+        edges[0] * edges[4] - edges[1] * edges[3],
+    ];
+    let length = cross[0].hypot(cross[1]).hypot(cross[2]);
+    (length > 0. && length.is_finite()).then(|| cross.map(|v| v / length))
 }
 
 pub fn save(path: &Path, mesh: &ExportMesh, format: ExportFormat) -> Result<(), String> {

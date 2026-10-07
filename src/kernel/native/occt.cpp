@@ -129,6 +129,7 @@ struct ModelCacheImpl {
   std::vector<FeatureEntry> features;
   std::vector<EditEntry> edits;
   size_t reused = 0;
+  TopoDS_Shape final_shape;
 };
 ModelCache::ModelCache() : impl(std::make_unique<ModelCacheImpl>()) {}
 ModelCache::~ModelCache() = default;
@@ -345,6 +346,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
       throw std::runtime_error("Invalid model feature count");
     if (cache) {
       if (keys.size() != steps.size() + creates.size() + edits.size()) throw std::runtime_error("Invalid cache keys");
+      cache->final_shape.Nullify();
       cache->reused = 0;
       cache->features.resize(steps.size() + creates.size());
       cache->edits.resize(edits.size());
@@ -508,6 +510,7 @@ static Mesh evaluate_impl(ModelCacheImpl *cache, rust::Slice<const rust::String>
         x.X(),x.Y(),x.Z(),y.X(),y.Y(),y.Z(),n.X(),n.Y(),n.Z()});
     }
     check_cancelled();
+    if (cache) cache->final_shape = combined;
     return result;
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(e.GetMessageString());
@@ -582,3 +585,5 @@ Mesh extrude(rust::Slice<const Point2> points, double depth) {
   }
 }
 } // namespace confusion
+
+#include "step.inc"

@@ -9,6 +9,25 @@ struct Value {
     n: f64,
     dimension: [i32; 2],
 }
+impl Value {
+    fn finite(self) -> Result<Self, String> {
+        if self.n.is_finite() {
+            Ok(self)
+        } else {
+            Err("Expression produced a nonfinite number".into())
+        }
+    }
+}
+fn checked_dimensions(
+    left: [i32; 2],
+    right: [i32; 2],
+    operation: fn(i32, i32) -> Option<i32>,
+) -> Result<[i32; 2], String> {
+    Ok([
+        operation(left[0], right[0]).ok_or("Expression dimension overflow")?,
+        operation(left[1], right[1]).ok_or("Expression dimension overflow")?,
+    ])
+}
 struct Parser<'a> {
     source: &'a [u8],
     offset: usize,
@@ -118,6 +137,7 @@ impl Parser<'_> {
                 return Err("Cannot add lengths and scalars".into());
             }
             v.n += sign * r.n;
+            v = v.finite()?;
         }
         Ok(v)
     }
@@ -133,12 +153,16 @@ impl Parser<'_> {
             };
             let r = self.power()?;
             if divide {
+                if r.n == 0. {
+                    return Err("Division by zero".into());
+                }
                 v.n /= r.n;
-                v.dimension = std::array::from_fn(|i| v.dimension[i] - r.dimension[i]);
+                v.dimension = checked_dimensions(v.dimension, r.dimension, i32::checked_sub)?;
             } else {
                 v.n *= r.n;
-                v.dimension = std::array::from_fn(|i| v.dimension[i] + r.dimension[i]);
+                v.dimension = checked_dimensions(v.dimension, r.dimension, i32::checked_add)?;
             }
+            v = v.finite()?;
         }
         Ok(v)
     }
@@ -150,7 +174,9 @@ impl Parser<'_> {
                 return Err("Exponent must be a bounded integer scalar".into());
             }
             value.n = value.n.powf(exponent.n);
-            value.dimension = value.dimension.map(|power| power * exponent.n as i32);
+            value.dimension =
+                checked_dimensions(value.dimension, [exponent.n as i32; 2], i32::checked_mul)?;
+            value = value.finite()?;
         }
         Ok(value)
     }
@@ -161,7 +187,7 @@ impl Parser<'_> {
         self.depth += 1;
         let result = self.atom_inner();
         self.depth -= 1;
-        result
+        result.and_then(Value::finite)
     }
     fn atom_inner(&mut self) -> Result<Value, String> {
         if self.take(b'-') {
@@ -197,6 +223,9 @@ impl Parser<'_> {
                 .unwrap()
                 .parse::<f64>()
                 .map_err(|_| "Invalid number")?;
+            if !n.is_finite() {
+                return Err("Nonfinite number literal".into());
+            }
             self.space();
             let unit_start = self.offset;
             while self

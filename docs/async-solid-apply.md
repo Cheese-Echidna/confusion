@@ -38,7 +38,12 @@ results reused at commit.
 
 `examples/async_apply_review.py` runs the actual desktop WorkspaceView in an
 isolated instrumented copy and temporary settings directory. It sends no input
-events and automatically closes its own window. Assertions cover Create/Modify
+events and automatically closes its own window. Its temporary manifest disables
+automatic binary discovery. It builds `confusion-async-apply-review` explicitly
+in a separate target directory under `reviews/async-apply`. This isolates
+both the executable and instrumented library from normal builds.
+The performance review likewise uses `confusion-desktop-review` and
+`reviews/desktop-performance`. Assertions cover Create/Modify
 success, one undo checkpoint per commit, editor persistence while pending,
 duplicate Apply suppression, undo/redo, failed fillet recovery, dismissal, edited
 inputs, undo during pending validation, document switching, and clean/dirty state

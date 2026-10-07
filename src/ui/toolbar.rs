@@ -19,6 +19,7 @@ impl Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Export(crate::exchange::export::ExportFormat),
+    ExportStep,
     ImportFusion,
     SolidCreate(crate::model::solid_create::CreateKind),
     SolidModify(crate::model::modify::ModifyKind),

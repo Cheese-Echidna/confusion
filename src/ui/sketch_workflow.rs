@@ -3,8 +3,19 @@
 impl WorkspaceView {
     fn sketch_position(&self, position: Point<Pixels>, suppress: bool) -> Option<[f64; 2]> {
         let b = self.bounds.get()?;
-        let (origin,direction)=self.camera.ray([f64::from(position.x-b.origin.x),f64::from(position.y-b.origin.y)],[f64::from(b.size.width) as u32,f64::from(b.size.height) as u32])?;
-        let [x,y]=self.active_frame().intersect(nalgebra::Point3::from(origin.coords/25.),direction)?;
+        let (origin, direction) = self.camera.ray(
+            [
+                f64::from(position.x - b.origin.x),
+                f64::from(position.y - b.origin.y),
+            ],
+            [
+                f64::from(b.size.width) as u32,
+                f64::from(b.size.height) as u32,
+            ],
+        )?;
+        let [x, y] = self
+            .active_frame()
+            .intersect(nalgebra::Point3::from(origin.coords / 25.), direction)?;
         if suppress {
             return Some([x, y]);
         }
@@ -43,7 +54,7 @@ impl WorkspaceView {
             Tool::Spline => "Spline · Click fit points · Enter to finish",
             Tool::Dimension => "Dimension · Select geometry · Enter value · Enter to confirm",
             Tool::Measure => "Measure · Select geometry · Shift-click a second entity",
-            Tool::Break => "Break · Click the point on a line",
+            Tool::Break => "Break · Click a point inside a line or arc",
             Tool::Trim => "Trim · Click the segment to remove",
             Tool::Extend => "Extend · Click the end to extend",
         }
@@ -115,7 +126,13 @@ impl WorkspaceView {
                     .filter(|c| c.kind.parameter().is_some())
                     .find(|c| {
                         let p = self.dimension_anchor(&d, c);
-                        self.dimension_hit(&d, c, at) || self.sketch_screen(p).zip(self.sketch_screen(at)).is_some_and(|(p, at)| (p[0]+7.-at[0]).hypot(p[1]-8.-at[1]) < 18.)
+                        self.dimension_hit(&d, c, at)
+                            || self
+                                .sketch_screen(p)
+                                .zip(self.sketch_screen(at))
+                                .is_some_and(|(p, at)| {
+                                    (p[0] + 7. - at[0]).hypot(p[1] - 8. - at[1]) < 18.
+                                })
                     })
             {
                 let id = c.id;
@@ -189,7 +206,9 @@ impl WorkspaceView {
                 if let Ok(Some(region)) = crate::sketch::regions::at(&d, &xy, at) {
                     self.sketch_region = Some(region.clone());
                     for id in region.boundary {
-                        if !self.selection.contains(&id) { self.selection.push(id); }
+                        if !self.selection.contains(&id) {
+                            self.selection.push(id);
+                        }
                     }
                     self.line = None;
                     cx.notify();
@@ -201,7 +220,7 @@ impl WorkspaceView {
             if self.tool == Tool::Dimension {
                 self.dimension_edit = None;
                 self.panel = Some(Panel::Dimension);
-                self.dimension_position=Some(at);
+                self.dimension_position = Some(at);
                 if let Ok(kind) = crate::sketch::dimensions::kind(&d, &self.selection, Uuid::nil())
                     && let Some(v) = crate::sketch::dimensions::value(&d, &kind)
                 {
@@ -640,7 +659,7 @@ impl WorkspaceView {
                 } else {
                     let name = format!("d{}", d.parameters.len() + 1);
                     d.parameters.push(crate::document::schema::Parameter {
-                                scalar: false,
+                        scalar: false,
                         id: parameter,
                         name,
                         expression,
@@ -856,14 +875,25 @@ impl WorkspaceView {
             }
         }
     }
-    fn dimension_hit(&self, d: &Design, c: &crate::document::schema::Constraint, at: [f64; 2]) -> bool {
+    fn dimension_hit(
+        &self,
+        d: &Design,
+        c: &crate::document::schema::Constraint,
+        at: [f64; 2],
+    ) -> bool {
         let ends = match c.kind {
-            ConstraintKind::Length { line, .. } => d.lines.iter().find(|l| l.id == line).map(|l| l.ends),
-            ConstraintKind::Distance { points, .. } | ConstraintKind::DistanceX { points, .. }
-            | ConstraintKind::DistanceY { points, .. } | ConstraintKind::ProjectedDistance { points, .. } => Some(points),
+            ConstraintKind::Length { line, .. } => {
+                d.lines.iter().find(|l| l.id == line).map(|l| l.ends)
+            }
+            ConstraintKind::Distance { points, .. }
+            | ConstraintKind::DistanceX { points, .. }
+            | ConstraintKind::DistanceY { points, .. }
+            | ConstraintKind::ProjectedDistance { points, .. } => Some(points),
             _ => None,
         };
-        let Some(ends) = ends else { return false; };
+        let Some(ends) = ends else {
+            return false;
+        };
         let a = crate::sketch::entities::position(d, ends[0]);
         let b = crate::sketch::entities::position(d, ends[1]);
         let anchor = self.dimension_anchor(d, c);
@@ -871,17 +901,28 @@ impl WorkspaceView {
             ConstraintKind::DistanceX { .. } => [1., 0.],
             ConstraintKind::DistanceY { .. } => [0., 1.],
             ConstraintKind::ProjectedDistance { direction, .. } => direction,
-            _ => [b[0]-a[0], b[1]-a[1]],
+            _ => [b[0] - a[0], b[1] - a[1]],
         };
         let length = direction[0].hypot(direction[1]).max(1e-12);
-        let normal = [-direction[1]/length, direction[0]/length];
-        let project = |p: [f64;2]| { let offset = (anchor[0]-p[0])*normal[0]+(anchor[1]-p[1])*normal[1]; [p[0]+offset*normal[0], p[1]+offset*normal[1]] };
-        let Some(a) = self.sketch_screen(project(a)) else { return false; };
-        let Some(b) = self.sketch_screen(project(b)) else { return false; };
-        let Some(p) = self.sketch_screen(at) else { return false; };
-        let delta = [b[0]-a[0], b[1]-a[1]];
-        let fraction = (((p[0]-a[0])*delta[0]+(p[1]-a[1])*delta[1]) / (delta[0]*delta[0]+delta[1]*delta[1]).max(1e-12)).clamp(0.,1.);
-        (p[0]-a[0]-fraction*delta[0]).hypot(p[1]-a[1]-fraction*delta[1]) < 7.
+        let normal = [-direction[1] / length, direction[0] / length];
+        let project = |p: [f64; 2]| {
+            let offset = (anchor[0] - p[0]) * normal[0] + (anchor[1] - p[1]) * normal[1];
+            [p[0] + offset * normal[0], p[1] + offset * normal[1]]
+        };
+        let Some(a) = self.sketch_screen(project(a)) else {
+            return false;
+        };
+        let Some(b) = self.sketch_screen(project(b)) else {
+            return false;
+        };
+        let Some(p) = self.sketch_screen(at) else {
+            return false;
+        };
+        let delta = [b[0] - a[0], b[1] - a[1]];
+        let fraction = (((p[0] - a[0]) * delta[0] + (p[1] - a[1]) * delta[1])
+            / (delta[0] * delta[0] + delta[1] * delta[1]).max(1e-12))
+        .clamp(0., 1.);
+        (p[0] - a[0] - fraction * delta[0]).hypot(p[1] - a[1] - fraction * delta[1]) < 7.
     }
     fn dimension_anchor(&self, d: &Design, c: &crate::document::schema::Constraint) -> [f64; 2] {
         d.dimension_positions
@@ -890,19 +931,21 @@ impl WorkspaceView {
             .unwrap_or_else(|| {
                 let first = c.kind.references().first().copied().unwrap_or(Uuid::nil());
                 let p = crate::sketch::entities::position(d, first);
-                if let ConstraintKind::Diameter { circle, .. } | ConstraintKind::Radius { circle, .. } = c.kind
-                    && let Some(circle) = d.circles.iter().find(|v| v.id == circle) {
+                if let ConstraintKind::Diameter { circle, .. }
+                | ConstraintKind::Radius { circle, .. } = c.kind
+                    && let Some(circle) = d.circles.iter().find(|v| v.id == circle)
+                {
                     let center = crate::sketch::entities::position(d, circle.center);
                     let rim = crate::sketch::entities::position(d, circle.rim);
-                    let radius = (rim[0]-center[0]).hypot(rim[1]-center[1]);
-                    return [center[0]+radius*1.25, center[1]+radius*0.55];
+                    let radius = (rim[0] - center[0]).hypot(rim[1] - center[1]);
+                    return [center[0] + radius * 1.25, center[1] + radius * 0.55];
                 }
                 [p[0] + 0.004, p[1] + 0.004]
             })
     }
     fn finish_sketch_drag(&mut self, cancel: bool, cx: &mut Context<Self>) {
         if let Some((id, before, moved)) = self.dimension_drag.take() {
-            self.dirty_cache.set((u64::MAX,false));
+            self.dirty_cache.set((u64::MAX, false));
             if cancel {
                 self.design = before;
             } else if moved {

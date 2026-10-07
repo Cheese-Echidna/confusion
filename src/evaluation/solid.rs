@@ -47,6 +47,23 @@ mod implementation {
     ) -> Result<EvaluatedModel, String> {
         evaluate_internal(design, || token.is_cancelled(), cache, true, Some(token))
     }
+    /// Evaluate from scratch while retaining exact native topology for exchange.
+    pub(crate) fn evaluate_for_export(
+        design: &Design,
+    ) -> Result<(EvaluatedModel, crate::evaluation::cache::EvaluationCache), String> {
+        let mut cache = crate::evaluation::cache::EvaluationCache::default();
+        let model = evaluate_internal(design, || false, &mut cache, true, None)?;
+        if model.sketches.iter().any(|(id, _)| {
+            cache
+                .sketches
+                .get(id)
+                .is_some_and(|(_, s)| !s.conflicts.is_empty())
+        }) || !model.solution.conflicts.is_empty()
+        {
+            return Err("Resolve sketch conflicts before STEP export".into());
+        }
+        Ok((model, cache))
+    }
     fn evaluate_internal(
         design: &Design,
         cancelled: impl Fn() -> bool,

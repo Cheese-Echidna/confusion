@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 
 source = pathlib.Path(__file__).resolve().parents[1]
+# Instrumented libraries must also be isolated from the production Cargo cache.
+production_metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=source))
+os.environ["CARGO_TARGET_DIR"] = str(pathlib.Path(production_metadata["target_directory"]) / "reviews" / "async-apply")
 with tempfile.TemporaryDirectory(prefix="confusion-async-apply-") as directory:
     root = pathlib.Path(directory)
     target = root / "source"
@@ -133,11 +136,14 @@ with tempfile.TemporaryDirectory(prefix="confusion-async-apply-") as directory:
 '''
     assert text.count(needle) == 1
     path.write_text(text.replace(needle, needle + patch))
+    review_manifest = target / "Cargo.toml"
+    manifest_text = review_manifest.read_text().replace('edition = "2024"', 'edition = "2024"\nautobins = false', 1)
+    review_manifest.write_text(manifest_text + '\n[[bin]]\nname = "confusion-async-apply-review"\npath = "src/main.rs"\n')
     manifest = str(target / "Cargo.toml")
-    subprocess.run(["cargo", "build", "--locked", "--release", "--features", "desktop", "--manifest-path", manifest], cwd=source, check=True)
+    subprocess.run(["cargo", "build", "--locked", "--release", "--features", "desktop", "--bin", "confusion-async-apply-review", "--manifest-path", manifest], cwd=source, check=True)
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1", "--manifest-path", manifest], cwd=source))
     binary = root / "confusion-apply-review"
-    shutil.copy2(pathlib.Path(metadata["target_directory"]) / "release/confusion", binary)
+    shutil.copy2(pathlib.Path(metadata["target_directory"]) / "release/confusion-async-apply-review", binary)
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
     env["XDG_CONFIG_HOME"] = str(root / "config")

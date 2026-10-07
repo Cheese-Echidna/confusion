@@ -45,3 +45,9 @@ namespace confusion {
 struct EvaluationCancellation;
 Mesh evaluate_cancellable_model(ModelCache &, rust::Slice<const ProfileEdge>, rust::Slice<const ModelStep>, rust::Slice<const FaceRequest>, rust::Slice<const ModifyStep>, rust::Slice<const CreateStep>, rust::Slice<const rust::String>, const EvaluationCancellation &);
 }
+
+namespace confusion {
+struct Inspection;
+Inspection write_step(const ModelCache &, rust::Str);
+Mesh inspect_step(rust::Str);
+}
